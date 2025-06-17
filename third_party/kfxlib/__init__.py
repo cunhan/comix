@@ -1,7 +1,3 @@
-#! /usr/bin/python3
-
-from __future__ import (unicode_literals, division, absolute_import, print_function)
-
 from . import message_logging
 from . import utilities
 from . import yj_book
@@ -9,10 +5,11 @@ from . import yj_metadata
 
 
 __license__ = "GPL v3"
-__copyright__ = "2016-2023, John Howell <jhowell@acm.org>"
+__copyright__ = "2016-2025, John Howell <jhowell@acm.org>"
 
 
 set_logger = message_logging.set_logger
+JobLog = message_logging.JobLog
 YJ_Book = yj_book.YJ_Book
 YJ_Metadata = yj_metadata.YJ_Metadata
 KFXDRMError = utilities.KFXDRMError

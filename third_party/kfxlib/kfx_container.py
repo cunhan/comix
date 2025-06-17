@@ -1,5 +1,3 @@
-from __future__ import (unicode_literals, division, absolute_import, print_function)
-
 import copy
 
 from .ion import (IonBLOB, IonAnnotation, IonStruct, IS)
@@ -15,7 +13,7 @@ from .yj_symbol_catalog import SYSTEM_SYMBOL_TABLE
 
 
 __license__ = "GPL v3"
-__copyright__ = "2016-2023, John Howell <jhowell@acm.org>"
+__copyright__ = "2016-2025, John Howell <jhowell@acm.org>"
 
 
 DEBUG = False

@@ -1,8 +1,3 @@
-#!/usr/bin/python
-# -*- coding: utf8 -*-
-
-from __future__ import (unicode_literals, division, absolute_import, print_function)
-
 import collections
 import decimal
 import functools
@@ -16,7 +11,7 @@ from .utilities import (get_url_filename, list_symbols, natural_sort_key, remove
 
 
 __license__ = "GPL v3"
-__copyright__ = "2016-2023, John Howell <jhowell@acm.org>"
+__copyright__ = "2016-2025, John Howell <jhowell@acm.org>"
 
 
 STYLE_TEST = False
@@ -428,6 +423,8 @@ YJ_PROPERTY_INFO = {
     "$75": Prop("-webkit-text-stroke-color"),
 
     "$531": Prop("-svg-stroke-dasharray"),
+
+    "$532": Prop("-svg-stroke-dashoffset"),
 
     "$77": Prop("-svg-stroke-linecap", {
         "$534": "butt",
@@ -1068,9 +1065,10 @@ class KFX_EPUB_Properties(object):
         self.css_rules = {}
         self.missing_special_classes = set()
         self.media_queries = collections.defaultdict(dict)
-        self.font_names = set()
-        self.missing_font_names = set()
+        self.present_font_names = set()
+        self.used_font_names = set()
         self.font_name_replacements = {}
+        self.fixed_font_names = {}
         self.font_faces = []
         self.incorrect_font_quoting = set()
 
@@ -1258,7 +1256,7 @@ class KFX_EPUB_Properties(object):
 
         elif val_type is IonString:
             if yj_property_name == "$11":
-                value = self.fix_font_family_list(yj_value)
+                value = self.fix_and_quote_font_family_list(yj_value)
             elif yj_property_name == "$10":
                 value = self.fix_language(yj_value)
             else:
@@ -1292,7 +1290,7 @@ class KFX_EPUB_Properties(object):
                     value = str(yj_value)
 
                 if yj_property_name == "$11":
-                    value = self.fix_font_family_list(value)
+                    value = self.fix_and_quote_font_family_list(value)
 
         elif val_type in [IonInt, IonFloat, IonDecimal]:
             value = value_str(yj_value)
@@ -1924,16 +1922,27 @@ class KFX_EPUB_Properties(object):
                 elem.tag = "h" + kfx_heading_level
                 inherited_properties.pop("font-size")
                 inherited_properties.pop("font-weight")
-                inherited_properties.pop("margin-top")
-                inherited_properties.pop("margin-bottom")
+
+                if sty.get("writing-mode", "horizontal-tb") == "horizontal-tb":
+                    inherited_properties.pop("margin-top")
+                    inherited_properties.pop("margin-bottom")
+                else:
+                    inherited_properties.pop("margin-left")
+                    inherited_properties.pop("margin-right")
 
             elif "figure" in kfx_layout_hints and contains_image and not self.epub2_desired:
                 elem.tag = "figure"
-                inherited_properties.update({"margin-top": "1em", "margin-bottom": "1em"}, replace=True)
+                if sty.get("writing-mode", "horizontal-tb") == "horizontal-tb":
+                    inherited_properties.update({"margin-top": "1em", "margin-bottom": "1em"}, replace=True)
+                else:
+                    inherited_properties.update({"margin-left": "1em", "margin-right": "1em"}, replace=True)
 
             elif contains_text and not contains_block_elem:
                 elem.tag = "p"
-                inherited_properties.update({"margin-top": "1em", "margin-bottom": "1em"}, replace=True)
+                if sty.get("writing-mode", "horizontal-tb") == "horizontal-tb":
+                    inherited_properties.update({"margin-top": "1em", "margin-bottom": "1em"}, replace=True)
+                else:
+                    inherited_properties.update({"margin-left": "1em", "margin-right": "1em"}, replace=True)
 
         if split_value(sty.get("font-size", ""))[1] == "em":
             inherited_properties["font-size"] = "1em"
@@ -2007,38 +2016,69 @@ class KFX_EPUB_Properties(object):
         for child in elem.findall("*"):
             self.add_composite_and_equivalent_styles(child, book_part)
 
-    def fix_font_family_list(self, value):
-        return self.join_font_family_value(remove_duplicates([self.fix_font_name(name) for name in self.split_font_family_value(value)]))
+    def fix_and_quote_font_family_list(self, value):
+        font_family = ",".join(remove_duplicates(
+            [self.quote_font_name(name) for name in self.split_and_fix_font_family_list(value)]))
+        return font_family or None
 
-    def split_font_family_value(self, value):
-        return [self.unquote_font_name(name.strip()) for name in value.split(",")]
+    def split_and_fix_font_family_list(self, value):
+        return list(filter(None, [self.fix_font_name(name) for name in value.split(",")]))
 
-    def join_font_family_value(self, value_list):
-        return ",".join([self.quote_font_name(font_name) for font_name in value_list])
+    def strip_font_name(self, name):
+        name = name.strip()
+
+        if name and (name[0] == "'" or name[0] == "\""):
+            name = name[1:]
+
+        if name and (name[-1] == "'" or name[-1] == "\""):
+            name = name[:-1]
+
+        return name.strip()
 
     def fix_font_name(self, name, add=False, generic=False):
-        name = self.unquote_font_name(name)
+
+        name = self.strip_font_name(name)
+        if not name:
+            return name
+
+        orig_name = name.lower()
+
+        fixed_name = self.fixed_font_names.get(orig_name)
+        if fixed_name is not None:
+            return fixed_name
+
+        name = name.replace("\\", "")
 
         name = re.sub(r"-(oblique|italic|bold|regular|roman|medium)$", r" \1", name, flags=re.IGNORECASE)
         name = MISSPELLED_FONT_NAMES.get(name.lower(), name)
 
-        name = name.replace("sans-serif", "sans_serif")
+        has_prefix = "-" in name and name != "sans-serif"
+        if has_prefix:
+            name = name.replace("sans-serif", "sans_serif")
+            name = name.rpartition("-")[2]
+            name = name.replace("sans_serif", "sans-serif")
 
-        prefix, sep, name = name.rpartition("-")
-
-        name = name.replace("sans_serif", "sans-serif").strip()
+        name = name.strip()
 
         if add:
-            self.font_name_replacements[name.lower()] = name
+            lower_name = ("?-" if has_prefix else "") + name.lower()
+            if lower_name not in self.font_name_replacements:
+                self.font_name_replacements[lower_name] = name
+            elif self.font_name_replacements[lower_name] != name:
+                log.warning("KFX font family name %s changed from %s to %s" % (
+                    orig_name, name, self.font_name_replacements[lower_name]))
+                name = self.font_name_replacements[lower_name]
 
             if not generic:
-                self.font_names.add(name)
+                self.present_font_names.add(name)
 
         else:
             name = self.font_name_replacements.get(name.lower(), capitalize_font_name(name))
 
-            if name not in self.font_names and name not in GENERIC_FONT_NAMES:
-                self.missing_font_names.add(name)
+            if name not in GENERIC_FONT_NAMES:
+                self.used_font_names.add(name)
+
+        self.fixed_font_names[orig_name] = name
 
         return name
 
@@ -2219,38 +2259,26 @@ class KFX_EPUB_Properties(object):
                     self.STYLES_CSS_FILEPATH, data="\n".join(css_lines).encode("utf-8"), mimetype="text/css")
 
     def quote_font_name(self, value):
-        if re.match(r"^[a-zA-Z][a-zA-Z0-9-]*$", value):
+        for ident in value.split(" "):
+            if len(ident) == 0:
+                break
+
+            if re.match("^(-?[0-9]|--)", ident) or not re.match("^[-_a-zA-Z0-9]*$", ident):
+                break
+        else:
             return value
 
-        return self.quote_css_str(value, force_quote=True)
-
-    def unquote_font_name(self, value):
-        orig_value = value
-
-        if len(value) > 1 and value[0] in ["'", "\""] and value[0] == value[-1]:
-            value = value[1:-1]
-
-        if "'" in value or "\"" in value:
-            if orig_value not in self.incorrect_font_quoting:
-                log.warning("Incorrectly quoted font family: %s" % orig_value)
-                self.incorrect_font_quoting.add(orig_value)
-
-            value = value.replace("\"", "").replace("'", "").strip()
-
-        return value
+        return self.quote_css_str(value)
 
     def css_url(self, val):
-        return "url(%s)" % self.quote_css_str(val)
+        return "url(%s)" % (self.quote_css_str(val) if re.search("[ ()'\"\\\\]", val) else val)
 
-    def quote_css_str(self, val, force_quote=False):
-
-        if not (force_quote or re.search("[ ()'\"\\\\]", val)):
-            return val
+    def quote_css_str(self, val):
 
         if not re.search("['\\\\]", val):
             return "'%s'" % val
 
-        return "\"%s\"" % re.sub("[\"\\\\]", "\\\\\\1", val)
+        return "\"%s\"" % re.sub("([\"\\\\])", "\\\\\\1", val)
 
 
 @functools.total_ordering
@@ -2455,7 +2483,7 @@ def split_value(val):
 
 
 def capitalize_font_name(name):
-    return " ".join([(word.capitalize() if len(word) > 2 else word.upper()) for word in name.split()])
+    return " ".join([(word.capitalize() if len(word) > 2 else word.upper()) for word in name.split(" ")])
 
 
 def class_selector(class_name):

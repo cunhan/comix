@@ -1,5 +1,3 @@
-from __future__ import (unicode_literals, division, absolute_import, print_function)
-
 from PIL import Image
 import io
 import random
@@ -7,15 +5,18 @@ import string
 
 from .ion import (IS, IonBLOB, IonStruct, IonSymbol, ion_type, unannotated)
 from .message_logging import log
+from .original_source_epub import LANGUAGE_FIXUPS
 from .resources import (FORMAT_SYMBOLS, image_size, jpeg_type, SYMBOL_FORMATS)
-from .utilities import (disable_debug_log, list_symbols, list_symbols_unsorted, quote_name)
+from .utilities import (disable_debug_log, list_symbols, list_symbols_unsorted, natural_sort_key, quote_name)
 from .yj_container import (YJFragment, YJFragmentKey)
 from .yj_structure import (METADATA_NAMES, METADATA_SYMBOLS)
-from .yj_versions import (is_known_feature, is_known_generator, is_known_metadata, PACKAGE_VERSION_PLACEHOLDERS)
+from .yj_versions import (
+    kindle_feature_version, is_known_feature, is_known_generator, is_known_metadata, PACKAGE_VERSION_PLACEHOLDERS,
+    UNSUPPORTED)
 
 
 __license__ = "GPL v3"
-__copyright__ = "2016-2023, John Howell <jhowell@acm.org>"
+__copyright__ = "2016-2025, John Howell <jhowell@acm.org>"
 
 
 DEBUG_COVER_PAGES = False
@@ -119,6 +120,12 @@ class BookMetadata(object):
 
         if yj_metadata.asin is True:
             yj_metadata.asin = "".join(random.choice(string.ascii_uppercase + string.digits) for _ in range(32))
+
+        if yj_metadata.language:
+            yj_metadata.language = fix_language_for_kfx(yj_metadata.language)
+            orig_language = self.get_metadata_value("language")
+            if orig_language and orig_language.startswith(yj_metadata.language + "-"):
+                yj_metadata.language = None
 
         book_metadata_fragment = self.fragments.get("$490")
         metadata_fragment = self.fragments.get("$258")
@@ -276,6 +283,18 @@ class BookMetadata(object):
         return self._cached_is_fixed_layout
 
     @property
+    def is_image_based_fixed_layout(self):
+        if not hasattr(self, "_cached_is_image_based_fixed_layout"):
+            try:
+                self.get_ordered_image_resources()
+            except Exception:
+                self._cached_is_image_based_fixed_layout = False
+            else:
+                self._cached_is_image_based_fixed_layout = True
+
+        return self._cached_is_image_based_fixed_layout
+
+    @property
     def is_print_replica(self):
         if not hasattr(self, "_cached_is_print_replica"):
             yj_textbook = self.get_metadata_value("yj_textbook", category="kindle_capability_metadata")
@@ -382,8 +401,6 @@ class BookMetadata(object):
     def get_features(self):
         features = set()
 
-        features.add(("symbols", "max_id", self.symtab.local_min_id - 1))
-
         for fragment in self.fragments.get_all("$593"):
             for fc in fragment.value:
                 features.add(("format_capabilities", fc.get("$492", ""), fc.get("version", "")))
@@ -416,16 +433,21 @@ class BookMetadata(object):
 
     def report_features_and_metadata(self, unknown_only=False):
         report_features = set()
+        min_kindle_version = None
         for namespace, key, value in sorted(self.get_features()):
             val_str = quote_name(value) if isinstance(value, str) else (
                     ".".join([str(v) for v in value]) if isinstance(value, tuple) else str(value))
             if is_known_feature(namespace, key, value):
                 if not unknown_only:
                     report_features.add("%s-%s" % (key, val_str))
-            elif namespace == "symbols":
-                log.warning("Unknown %s feature: %s-%s" % (namespace, key, str(val_str)))
             else:
                 log.error("Unknown %s feature: %s-%s" % (namespace, key, str(val_str)))
+
+            min_version = kindle_feature_version(namespace, key, value)
+            if (min_kindle_version is not UNSUPPORTED and
+                    (min_version is UNSUPPORTED or min_kindle_version is None or
+                     natural_sort_key(min_version) > natural_sort_key(min_kindle_version))):
+                min_kindle_version = min_version
 
         if report_features:
             log.info("Features: %s" % list_symbols(report_features))
@@ -434,6 +456,11 @@ class BookMetadata(object):
 
         for generator in sorted(self.get_generators()):
             metadata.append(("kfxgen", "generator", len(metadata), ("%s/%s" % generator) if generator[1] else generator[0]))
+
+        metadata.append(("max_id", "symbols", len(metadata), self.symtab.local_min_id - 1))
+
+        if min_kindle_version is not None:
+            metadata.append(("min_kindle_version", "book_requirements", len(metadata), min_kindle_version))
 
         fragment = self.fragments.get("$490", first=True)
         if fragment is not None:
@@ -535,7 +562,7 @@ class BookMetadata(object):
                 with disable_debug_log():
                     cover = Image.open(io.BytesIO(data))
                     outfile = io.BytesIO()
-                    cover.save(outfile, "jpeg", quality=95, optimize=True)
+                    cover.save(outfile, "JPEG", quality="keep")
                     cover.close()
 
                 data = outfile.getvalue()
@@ -606,9 +633,9 @@ class BookMetadata(object):
         if "$214" in cover_resource:
             with disable_debug_log():
                 cover_thumbnail = Image.open(io.BytesIO(data))
-                cover_thumbnail.thumbnail((512, 512), Image.ANTIALIAS)
+                cover_thumbnail.thumbnail((512, 512), Image.LANCZOS)
                 outfile = io.BytesIO()
-                cover_thumbnail.save(outfile, "jpeg" if fmt == "jpg" else fmt, quality=95, optimize=True)
+                cover_thumbnail.save(outfile, "JPEG" if fmt == "jpg" else fmt, quality=95, optimize=True)
                 thumbnail_width, thumbnail_height = cover_thumbnail.size
                 cover_thumbnail.close()
 
@@ -847,3 +874,13 @@ def unsort_author_name(author):
         author = first + " " + last
 
     return author
+
+
+def fix_language_for_kfx(language):
+    short_language = language.lower().partition(" ")[0].partition("-")[0]
+    language = LANGUAGE_FIXUPS.get(short_language, language)
+
+    if language.lower() == "zh-tw":
+        language = "zh-hant"
+
+    return language

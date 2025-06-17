@@ -1,5 +1,3 @@
-from __future__ import (unicode_literals, division, absolute_import, print_function)
-
 import datetime
 
 from .message_logging import log
@@ -10,7 +8,7 @@ from .yj_structure import (METADATA_NAMES, SYM_TYPE)
 
 
 __license__ = "GPL v3"
-__copyright__ = "2016-2023, John Howell <jhowell@acm.org>"
+__copyright__ = "2016-2025, John Howell <jhowell@acm.org>"
 
 
 ORIENTATIONS = {
@@ -91,12 +89,6 @@ class KFX_EPUB_Metadata(object):
         self.reading_orders = document_data.pop("$169", [])
 
         self.nmdl_template_id = document_data.pop("nmdl.template_id", None)
-        if self.nmdl_template_id is not None and (
-                len(self.reading_orders) != 2 or
-                self.reading_orders[1].get("$178", "") != "note_template_collection" or
-                self.nmdl_template_id not in self.reading_orders[1]["$170"]):
-            log.error("note_template_collection reading order does not contain nmdl.template_id %s" % self.nmdl_template_id)
-            log.info("reading orders: %s" % repr(self.reading_orders))
 
         if "max_id" in document_data:
             max_id = document_data.pop("max_id")
@@ -116,10 +108,12 @@ class KFX_EPUB_Metadata(object):
         self.page_progression_direction = doc_style.pop("direction", "ltr")
 
         self.default_font_family = doc_style.pop("font-family", DEFAULT_DOCUMENT_FONT_FAMILY)
+        if "," in self.default_font_family:
+            log.warning("Default font family contains multiple names: %s" % self.default_font_family)
 
         for default_name in DEFAULT_FONT_NAMES:
-            for font_family in self.split_font_family_value(self.default_font_family):
-                self.font_name_replacements[default_name] = font_family
+            for font_family in self.default_font_family.split(","):
+                self.font_name_replacements[default_name] = self.strip_font_name(font_family)
 
         self.default_font_size = doc_style.pop("font-size", DEFAULT_DOCUMENT_FONT_SIZE)
         if self.default_font_size not in [DEFAULT_DOCUMENT_FONT_SIZE, DEFAULT_KC_COMIC_FONT_SIZE]:
@@ -132,6 +126,9 @@ class KFX_EPUB_Metadata(object):
         self.writing_mode = doc_style.pop("writing-mode", "horizontal-tb")
         if self.writing_mode not in ["horizontal-tb", "vertical-lr", "vertical-rl"]:
             log.warning("Unexpected document writing-mode: %s" % self.writing_mode)
+
+        if self.writing_mode.endswith("-rl"):
+            self.page_progression_direction = "rtl"
 
         self.check_empty(doc_style.properties, "document data styles")
         self.check_empty(document_data, "$538")
@@ -264,9 +261,15 @@ class KFX_EPUB_Metadata(object):
             self.scrolled_continuous = True
         elif cat_key == "kindle_capability_metadata/yj_guided_view_native":
             self.guided_view_native = True
+        elif cat_key == "kindle_capability_metadata/yj_has_text_popups":
+            self.set_book_type("children")
+            self.region_magnification = True
         elif cat_key == "kindle_capability_metadata/yj_publisher_panels":
             self.set_book_type("comic")
-            self.region_magnification = True
+            if value == 0:
+                self.virtual_panels_allowed = True
+            else:
+                self.region_magnification = True
         elif cat_key == "kindle_capability_metadata/yj_facing_page":
             self.set_book_type("comic")
         elif cat_key == "kindle_capability_metadata/yj_double_page_spread":

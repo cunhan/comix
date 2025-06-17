@@ -1,5 +1,3 @@
-from __future__ import (unicode_literals, division, absolute_import, print_function)
-
 import collections
 import datetime
 import io
@@ -12,8 +10,10 @@ import zipfile
 
 try:
     from calibre.utils.resources import get_path
+    from calibre.utils.config_base import tweaks
 except ImportError:
     get_path = None
+    tweaks = {}
 
 from .message_logging import log
 from .resources import (EPUB2_ALT_MIMETYPES, MIMETYPE_OF_EXT)
@@ -21,7 +21,7 @@ from .utilities import (make_unique_name, urlrelpath)
 
 
 __license__ = "GPL v3"
-__copyright__ = "2016-2023, John Howell <jhowell@acm.org>"
+__copyright__ = "2016-2025, John Howell <jhowell@acm.org>"
 
 
 GENERATE_EPUB2_NCX_DOCTYPE = False
@@ -166,6 +166,7 @@ class BookPart(OPFProperties):
         self.idref = idref
 
         self.is_cover_page = False
+        self.nmdl_template_id = None
 
     def head(self):
         head = self.html.find("head")
@@ -233,14 +234,14 @@ class EPUB_Output(object):
     DEBUG = False
 
     GENERATE_EPUB2_COMPATIBLE = True
-    PLACE_FILES_IN_SUBDIRS = False
+    PLACE_FILES_IN_SUBDIRS = True
 
     OEBPS_DIR = "OEBPS"
 
     OPF_FILEPATH = "/content.opf"
     NCX_FILEPATH = "/toc.ncx"
     TEXT_FILEPATH = "/part%04d.xhtml"
-    NOTEBOOK_TEXT_FILEPATH = "/%s.xhtml"
+    SECTION_TEXT_FILEPATH = "/%s.xhtml"
     COVER_FILEPATH = "/cover.xhtml"
     NAV_FILEPATH = "/nav%s.xhtml"
     FONT_FILEPATH = "/%s"
@@ -252,7 +253,7 @@ class EPUB_Output(object):
 
     if PLACE_FILES_IN_SUBDIRS:
         TEXT_FILEPATH = "/xhtml" + TEXT_FILEPATH
-        NOTEBOOK_TEXT_FILEPATH = "/xhtml" + NOTEBOOK_TEXT_FILEPATH
+        SECTION_TEXT_FILEPATH = "/xhtml" + SECTION_TEXT_FILEPATH
         COVER_FILEPATH = "/xhtml" + COVER_FILEPATH
         NAV_FILEPATH = "/xhtml" + NAV_FILEPATH
         FONT_FILEPATH = "/fonts" + FONT_FILEPATH
@@ -262,10 +263,11 @@ class EPUB_Output(object):
         RESET_CSS_FILEPATH = "/css" + RESET_CSS_FILEPATH
         LAYOUT_CSS_FILEPATH = "/css" + LAYOUT_CSS_FILEPATH
 
-    def __init__(self, epub2_desired=False, force_cover=False):
+    def __init__(self, epub2_desired=False, force_cover=False, will_output=True):
         self.epub2_desired = epub2_desired
         self.generate_epub2 = epub2_desired
         self.force_cover = force_cover
+        self.will_output = will_output
 
         self.oebps_files = {}
         self.book_parts = []
@@ -311,7 +313,8 @@ class EPUB_Output(object):
         self.set_book_type(None)
         self.set_primary_writing_mode("horizontal-lr")
 
-        log.info("Converting book to EPUB %s" % ("2" if self.generate_epub2 else "3"))
+        if self.will_output:
+            log.info("Converting book to EPUB %s" % ("2" if self.generate_epub2 else "3"))
 
     def set_book_type(self, book_type):
         if self.book_type is not None and self.book_type != book_type:
@@ -440,14 +443,6 @@ class EPUB_Output(object):
         if desc:
             log.info("Format is %s" % " ".join(desc))
 
-        if len(self.ncx_toc) == 0 and self.book_parts:
-            for g in sorted(self.guide, key=lambda g: TOC_PRIORITY_OF_GUIDE_TYPE.get(g.guide_type, 999)):
-                self.ncx_toc.append(TocEntry(g.title, target=g.target))
-                break
-            else:
-                if self.book_parts:
-                    self.ncx_toc.append(TocEntry("Content", target=self.book_parts[0].filename))
-
         self.check_epub_version()
 
         self.identify_cover()
@@ -456,6 +451,16 @@ class EPUB_Output(object):
 
         if self.force_cover:
             self.add_generic_cover_page()
+
+        if not self.book_parts:
+            raise Exception("Book does not contain any content")
+
+        if len(self.ncx_toc) == 0:
+            for g in sorted(self.guide, key=lambda g: TOC_PRIORITY_OF_GUIDE_TYPE.get(g.guide_type, 999)):
+                self.ncx_toc.append(TocEntry(g.title, target=g.target))
+                break
+            else:
+                self.ncx_toc.append(TocEntry("Content", target=self.book_parts[0].filename))
 
         if not self.generate_epub2:
             for book_part in self.book_parts:
@@ -498,6 +503,9 @@ class EPUB_Output(object):
 
         if filename is None:
             filename = self.TEXT_FILEPATH % part_index
+
+        if self.is_book_part_filename(filename):
+            raise Exception("BookPart filename %s is not unique" % filename)
 
         if html is None:
             html = new_xhtml()
@@ -598,9 +606,9 @@ class EPUB_Output(object):
     def is_book_part_filename(self, filename):
         for book_part in self.book_parts:
             if book_part.filename == filename:
-                return False
+                return True
 
-        return True
+        return False
 
     def compare_fixed_layout_viewports(self):
         viewport_count = collections.defaultdict(int)
@@ -957,7 +965,7 @@ class EPUB_Output(object):
             if not self.virtual_panels_allowed:
                 log.error("Virtual panels used when not allowed")
 
-            if self.region_magnification:
+            if self.region_magnification and not self.is_children:
                 log.error("Virtual panels used with region magnification")
 
         if self.illustrated_layout:
@@ -995,6 +1003,7 @@ class EPUB_Output(object):
 
         man = etree.SubElement(package, "manifest")
         toc_idref = None
+        has_page_spread = False
 
         for manifest_entry in sorted(self.manifest, key=lambda m: m.filename):
             if manifest_entry.filename == self.ncx_location or manifest_entry.filename.endswith(".ncx"):
@@ -1022,6 +1031,9 @@ class EPUB_Output(object):
                 else:
                     manifest_entry.opf_properties.add("rendition:layout-reflowable")
 
+                if manifest_entry.opf_properties & {"page-spread-left", "page-spread-right"}:
+                    has_page_spread = True
+
             item_properties = manifest_entry.opf_properties & MANIFEST_ITEM_PROPERTIES
             if len(item_properties) and not self.generate_epub2:
                 item.set("properties", " ".join(sorted(list(item_properties))))
@@ -1044,6 +1056,11 @@ class EPUB_Output(object):
                 itemref = etree.SubElement(spine, "itemref", attrib={"idref": manifest_entry.id})
 
                 itemref_properties = manifest_entry.opf_properties & SPINE_ITEMREF_PROPERTIES
+
+                if (tweaks.get("kfx_input_add_comic_spread_center", False) and self.is_comic
+                        and has_page_spread and not itemref_properties):
+                    itemref_properties.add("rendition:page-spread-center")
+
                 if len(itemref_properties) and not self.generate_epub2:
                     itemref.set("properties", " ".join([prefix(p) for p in sorted(list(itemref_properties))]))
 
@@ -1188,7 +1205,7 @@ class EPUB_Output(object):
         filename = self.NAV_FILEPATH % ""
 
         count = 0
-        while not self.is_book_part_filename(filename):
+        while self.is_book_part_filename(filename):
             filename = self.NAV_FILEPATH % ("%d" % count)
             count += 1
 

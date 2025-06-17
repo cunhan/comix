@@ -1,5 +1,3 @@
-from __future__ import (unicode_literals, division, absolute_import, print_function)
-
 import collections
 import io
 from PIL import Image
@@ -23,12 +21,13 @@ from .yj_versions import (is_known_aux_metadata, is_known_kcb_data)
 
 
 __license__ = "GPL v3"
-__copyright__ = "2016-2023, John Howell <jhowell@acm.org>"
+__copyright__ = "2016-2025, John Howell <jhowell@acm.org>"
 
 
 REPORT_KNOWN_PROBLEMS = None
 REPORT_NON_JPEG_JFIF_COVER = False
 REPORT_JPEG_VARIANTS = False
+DEBUG_PDF_PAGE_SIZE = False
 
 
 MAX_CONTENT_FRAGMENT_SIZE = 8192
@@ -63,6 +62,8 @@ for k, v in METADATA_SYMBOLS.items():
 CHECKED_IMAGE_FMTS = {"bmp", "bpg", "gif", "ico", "jpg", "pbm", "pdf", "png", "svg", "tiff", "webp"}
 UNCHECKED_IMAGE_FMTS = {"jxr", "kvg"}
 ALL_IMAGE_FMTS = CHECKED_IMAGE_FMTS | UNCHECKED_IMAGE_FMTS
+
+FIXED_LAYOUT_IMAGE_FORMATS = {"$286", "$285", "$548", "$565", "$284"}
 
 
 FRAGMENT_ID_KEYS = {
@@ -272,10 +273,9 @@ class BookStructure(object):
             actual_container_ids = set(containers.keys())
             missing_container_ids = cem_container_ids - actual_container_ids
             if missing_container_ids:
-                raise Exception("Book is incomplete. All of the KFX container files that make up the book must be combined "
-                                "into a KFX-ZIP file for successful conversion. (Missing containers %s)" %
-                                list_symbols(list(missing_container_ids)))
-                log.error("Entity map references missing containers: %s" % list_symbols(missing_container_ids))
+                log.error("Book is incomplete. All of the KFX container files that make up the book must be combined "
+                          "into a KFX-ZIP file for successful conversion. (Missing containers %s)" %
+                          list_symbols(list(missing_container_ids)))
 
             extra_ids = actual_container_ids - cem_container_ids
 
@@ -331,14 +331,12 @@ class BookStructure(object):
 
         missing_ftypes = required_ftypes - present_ftypes
         if missing_ftypes:
-            missing_ft = list_symbols(missing_ftypes)
-
             if missing_ftypes == {"$389"}:
-                log.warning("Book incomplete. Missing %s" % missing_ft)
+                log.warning("Book incomplete. Missing book_navigation")
             else:
-                #raise Exception("Book is incomplete. All of the KFX container files that make up the book must be combined "
-                #                "into a KFX-ZIP file for successful conversion. (Missing fragments %s)" % missing_ft)
-                log.error("Book incomplete. Missing %s" % missing_ft)
+                missing_ft = list_symbols(missing_ftypes)
+                log.error("Book is incomplete. All of the KFX container files that make up the book must be combined "
+                          "into a KFX-ZIP file for successful conversion. (Missing fragments %s)" % missing_ft)
 
         extra_ftypes = present_ftypes - allowed_ftypes
         if extra_ftypes:
@@ -583,13 +581,15 @@ class BookStructure(object):
                                 if img_format == "pdf":
                                     if (img_width and img_height and resource_width and resource_height and
                                             (numstr(img_width) != numstr(resource_width) or numstr(img_height) != numstr(resource_height))):
-                                        log.warning("Resource %s is %gx%g, PDF image %s page %d is %gx%g" % (
+                                        log.warning("Resource %s dimensions %gx%g, PDF image %s page %d is %gx%g" % (
                                             resource_name, resource_width, resource_height, location, page_num, img_width, img_height))
-                                        show_pdf_page_boxes(image_data, resource_name, page_num)
+
+                                        if DEBUG_PDF_PAGE_SIZE:
+                                            show_pdf_page_boxes(image_data, resource_name, page_num)
                                 else:
                                     if (img_width and img_height and resource_width and resource_height and
                                             (img_width != resource_width or img_height != resource_height)):
-                                        log.warning("Resource %s is %gx%g, image %s is %gx%g" % (
+                                        log.warning("Resource %s dimensions %gx%g, image %s is %gx%g" % (
                                             resource_name, resource_width, resource_height, location, img_width, img_height))
 
                                 if img_transparent and not self.is_magazine:
@@ -1075,13 +1075,13 @@ class BookStructure(object):
         if (re.match(
                 r"^(resource/|[ctliz])?[A-Za-z0-9_-]{22}[A-Z0-9]{0,6}"
                 r"((-hd|-first-frame|-thumb)?(-resized-[0-9]+-[0-9]+|-hd-tile-[0-9]+-[0-9]+)?|"
-                r"-ad|-spm|_thumbnail|-transcoded|(_thumb)?\.jpg|\.ttf|\.otf|\.woff|\.eot|\.dfont|\.bin)?$", name)):
+                r"-ad|-spm|_thumbnail|-transcoded|(_thumb)?\.jpg|\.ttf|\.otf|\.woff|\.woff2|\.eot|\.dfont|\.bin)?$", name)):
             return SYM_TYPE.BASE64
 
         if (re.match(
                 r"^(resource/rsrc|resource/e|rsrc|[a-z])[A-Z0-9]{1,6}"
                 r"((-hd|-first-frame|-thumb)?(-resized-[0-9]+-[0-9]+|-hd-tile-[0-9]+-[0-9]+)?|"
-                r"-ad|-spm|_thumbnail|-transcoded|(_thumb)?\.jpg|\.ttf|\.otf|\.woff|\.eot|\.dfont|\.bin)?$", name)):
+                r"-ad|-spm|_thumbnail|-transcoded|(_thumb)?\.jpg|\.ttf|\.otf|\.woff|\.woff2|\.eot|\.dfont|\.bin)?$", name)):
             return SYM_TYPE.SHORT
 
         return SYM_TYPE.UNKNOWN
@@ -1254,6 +1254,48 @@ class BookStructure(object):
                 return True
 
         return False
+
+    def get_ordered_image_resources(self):
+        if not self.is_fixed_layout:
+            raise Exception("Book is not fixed-layout")
+
+        content_pos_info = self.collect_content_position_info(
+            skip_non_rendered_content=True, include_background_images=True)
+
+        ordered_image_resources = []
+        ordered_image_resource_pids = []
+        next_pid = 0
+        section_images = collections.defaultdict(list)
+
+        for chunk in content_pos_info:
+            if chunk.text is not None:
+                raise Exception("Book contains unexpected text")
+
+            if chunk.image_resource is not None:
+                ordered_image_resources.append(chunk.image_resource)
+                ordered_image_resource_pids.append(chunk.pid)
+                section_images[chunk.section_name].append(chunk)
+
+            next_pid += chunk.length
+
+        if len(ordered_image_resources) == 0:
+            raise Exception("Book does not contain image resources")
+
+        for section_name, chunk_list in section_images.items():
+            if len(chunk_list) > 2:
+                raise Exception("Section %s contains more than two images" % section_name)
+
+            has_foreground_image = has_background_image = False
+            for chunk in chunk_list:
+                if chunk.length > 0:
+                    has_foreground_image = True
+                else:
+                    has_background_image = True
+
+            if has_foreground_image and has_background_image:
+                raise Exception("Section %s contains both background and foreground images" % section_name)
+
+        return (ordered_image_resources, ordered_image_resource_pids, content_pos_info)
 
     def log_known_error(self, msg):
         if REPORT_KNOWN_PROBLEMS:

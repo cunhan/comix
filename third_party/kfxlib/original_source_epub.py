@@ -1,5 +1,3 @@
-from __future__ import (unicode_literals, division, absolute_import, print_function)
-
 from .resources import font_file_ext
 from .utilities import (
         dirname, get_url_filename, locale_decode, natural_sort_key,
@@ -25,7 +23,7 @@ from .utilities import sha1
 
 
 __license__ = "GPL v3"
-__copyright__ = "2016-2023, John Howell <jhowell@acm.org>"
+__copyright__ = "2016-2025, John Howell <jhowell@acm.org>"
 
 
 DEOBFUSCATE_FONTS = True
@@ -46,6 +44,7 @@ COPY_PAGE_NUMBERS_TO_GUIDE = True
 FIX_SPACES_IN_LINKS = True
 FIX_AMZN_REMOVED_ATTRIBS = True
 FIX_CALIBRE_CLASS_IN_BR = True
+FIX_LANGUAGE_CODE = True
 FIX_LANGUAGE_SUFFIX = True
 FIX_WEBKIT_BOX_SHADOW = True
 FIX_EPUB3_SWITCH = True
@@ -55,18 +54,107 @@ FIX_LEFTOVER_CALIBRE_COVER = True
 FIX_CLASS_ON_TITLE = True
 FIX_MISSING_IMG_SRC = True
 FIX_MISSING_HREF_SLASH = True
+FIX_TFOOT_LOCATION = True
 
+LANGUAGE_FIXUPS = {
+    "nob": "nb",
+    "cor": "kw",
+    "fry": "fy",
+    "gle": "ga",
+    "jpn": "ja",
+    "ltz": "lb",
+    "glv": "gv",
+    "por": "pt",
+    "roh": "rm",
+    "gla": "gd",
+    "spa": "es",
+    "swe": "sv",
 
-KPR_UNSUPPORTED_LANGUAGES = [
-    "bn",
-    "cs",
-    "he",
-    "pl",
-    "ro",
-    "th",
-    "tr",
-    "vi",
+    "guj": "gu",
+    "hin": "hi",
+    "mal": "ml",
+    "mar": "mr",
+    "tam": "ta",
+
+    "bel": "be",
+    "ben": "bn",
+    "bos": "bs",
+    "bul": "bg",
+    "mya": "my",
+    "hrv": "hr",
+    "ces": "cs",
+    "est": "et",
+    "kat": "ka",
+    "ell": "el",
+    "heb": "he",
+    "hun": "hu",
+    "kor": "ko",
+    "lit": "lt",
+    "mkd": "mk",
+    "mlt": "mt",
+    "fas": "fa",
+    "pol": "pl",
+    "ron": "ro",
+    "srp": "sr",
+    "slk": "sk",
+    "slv": "sl",
+    "tha": "th",
+    "tur": "tr",
+    "vie": "vi",
+
+    "us": "en",
+    "und": "en",
+}
+
+KPR_SUPPORTED_LANGUAGES = [
+
+    "af", "afr",
+    "gsw",
+    "ar", "ara",
+    "eu", "eus",
+    "nb",
+    "br", "bre",
+    "ca", "cat",
+    "zh", "zho",
+    "zh-hant",
+    "kw",
+    "co", "cos",
+    "da", "dan",
+    "nl", "nld",
+    "frs",
+    "en", "eng",
+    "fi", "fin",
+    "fr", "fra",
+    "fy",
+    "gl", "glg",
+    "de", "deu",
+    "gu",
+    "hi",
+    "is", "isl",
+    "ga",
+    "it", "ita",
+    "ja",
+    "lb",
+    "ml",
+    "gv",
+    "mr",
+    "frr",
+    "no", "nor",
+    "nn", "nno",
+    "pt",
+    "frp",
+    "rm",
+    "ru", "rus",
+    "sco",
+    "gd",
+    "es",
+    "sw",
+    "sv",
+    "ta",
+    "uk", "ukr",
+    "cy", "cym",
     ]
+
 
 ENCODING_PATS = [
     r'''(<\?[^<>]+encoding\s*=\s*[\'"])(.*?)([\'"][^<>]*>)''',
@@ -237,7 +325,7 @@ class SourceEpub(object):
                     log.warning("Failed to prepare EPUB CSS %s: %s" % (f.filename, repr(e)))
 
         for f in self.data_files.values():
-            if self.opf_identifiers and f.ext in ["otf", "ttf", "woff", "eot", "dfont"]:
+            if self.opf_identifiers and f.ext in ["otf", "ttf", "woff", "woff2", "eot", "dfont"]:
                 try:
                     self.deobfuscate_font(f)
                 except Exception as e:
@@ -510,18 +598,22 @@ class SourceEpub(object):
                 fix_language_order = False
 
                 for lang in metadata.findall("{*}language"):
-                    short_language = lang.text.lower().partition(" ")[0].partition("-")[0]
-                    if short_language in KPR_UNSUPPORTED_LANGUAGES:
-                        if not add_original_language:
-                            add_original_language = short_language
+                    if FIX_LANGUAGE_CODE:
+                        short_language = lang.text.lower().partition(" ")[0].partition("-")[0]
+                        fixed_language = LANGUAGE_FIXUPS.get(short_language)
+                        if fixed_language is not None:
+                            log.info("Fixed EPUB language from '%s' to '%s'" % (lang.text, fixed_language))
+                            lang.text = fixed_language
+                            short_language = fixed_language.lower().partition(" ")[0].partition("-")[0]
+                            fixed = True
 
-                        log.info("Changed EPUB language from '%s' to 'en'" % lang.text)
-                        lang.text = "en"
-                        fixed = True
-                    elif short_language in ["und", "us"]:
-                        log.info("Changed EPUB language from '%s' to 'en'" % lang.text)
-                        lang.text = "en"
-                        fixed = True
+                        if short_language not in KPR_SUPPORTED_LANGUAGES:
+                            if not add_original_language:
+                                add_original_language = short_language
+
+                            log.info("Changed EPUB language from '%s' to 'en' to allow conversion" % lang.text)
+                            lang.text = "en"
+                            fixed = True
 
                     if FIX_LANGUAGE_SUFFIX and "-" not in lang.text:
                         current_language_pattern = re.compile(re.escape(lang.text) + "(-.+)?$", re.IGNORECASE)
@@ -530,6 +622,9 @@ class SourceEpub(object):
                         for language, count in self.content_languages.items():
                             if count > best_language_count and re.match(current_language_pattern, language):
                                 best_language_variant, best_language_count = language, count
+
+                        if best_language_variant.lower() == "zh-tw":
+                            best_language_variant = "zh-hant"
 
                         if best_language_variant != lang.text:
                             log.info("Changed EPUB language from '%s' to '%s'" % (lang.text, best_language_variant))
@@ -1042,6 +1137,14 @@ class SourceEpub(object):
                 log.info("Removed 'class' attribute from 'title' in %s" % f.filename)
                 fixed = True
 
+            if FIX_TFOOT_LOCATION and tag == "tfoot":
+                parent = elem.getparent()
+                if localname(parent.tag) == "table" and parent.index(elem) != len(parent) - 1:
+                    parent.remove(elem)
+                    parent.append(elem)
+                    log.info("Moved 'tfoot' to end of 'table' in %s" % f.filename)
+                    fixed = True
+
             if tag == "style" and elem.text:
                 self.inventory_css_styles(elem.text)
                 style_text = self.fix_styles(elem.text, f.filename)
@@ -1109,23 +1212,24 @@ class SourceEpub(object):
                     href = fixed_href
                     fixed = True
 
-            src = urlabspath(href, working_dir=base_dir)
+            if not href.startswith("/"):
+                src = urlabspath(href, working_dir=base_dir)
 
-            tf, tid, sort_key = self.ref_file_id_and_key(src)
-            if FIX_BODY_ID_REF and tf and tid and (tf.body_id == tid):
-                fixed_href = href.rpartition("#")[0]
-                log.info("Adjusted %s reference to body element id: %s --> %s" % (ftype, href, fixed_href))
-                elem.set("href", fixed_href)
-                fixed = True
+                tf, tid, sort_key = self.ref_file_id_and_key(src)
+                if FIX_BODY_ID_REF and tf and tid and (tf.body_id == tid):
+                    fixed_href = href.rpartition("#")[0]
+                    log.info("Adjusted %s reference to body element id: %s --> %s" % (ftype, href, fixed_href))
+                    elem.set("href", fixed_href)
+                    fixed = True
 
-            if FIX_SPACES_IN_LINKS and fix_spaces:
-                orig_src = elem.get("href")
-                if "%" in orig_src:
-                    fixed_src = urllib.parse.unquote(orig_src)
-                    if fixed_src != orig_src:
-                        log.info("Unquoted %s reference: %s" % (ftype, orig_src))
-                        elem.set("href", fixed_src)
-                        fixed = True
+                if FIX_SPACES_IN_LINKS and fix_spaces:
+                    orig_src = elem.get("href")
+                    if "%" in orig_src:
+                        fixed_src = urllib.parse.unquote(orig_src)
+                        if fixed_src != orig_src:
+                            log.info("Unquoted %s reference: %s" % (ftype, orig_src))
+                            elem.set("href", fixed_src)
+                            fixed = True
 
         return fixed
 

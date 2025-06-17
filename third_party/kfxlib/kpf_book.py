@@ -1,5 +1,3 @@
-from __future__ import (unicode_literals, division, absolute_import, print_function)
-
 import copy
 import decimal
 import re
@@ -16,7 +14,7 @@ from .yj_versions import (GENERIC_CREATOR_VERSIONS, is_known_aux_metadata)
 
 
 __license__ = "GPL v3"
-__copyright__ = "2016-2023, John Howell <jhowell@acm.org>"
+__copyright__ = "2016-2025, John Howell <jhowell@acm.org>"
 
 
 FIX_BOOK = True
@@ -464,9 +462,7 @@ class KpfBook(object):
                     if fk == "$161" and isstring(fv):
                         fv = IS(FORMAT_SYMBOLS[fv])
 
-                    if (not self.retain_yj_locals) and (
-                            fk.startswith("yj.authoring.") or fk.startswith("yj.conversion.") or
-                            fk.startswith("yj.print.") or fk.startswith("yj.semantics.")):
+                    if (not self.retain_yj_locals) and re.match(r"^yj\.(authoring|conversion|print|semantics)\.", fk):
                         continue
 
                     if (self.is_illustrated_layout and fragment.ftype == "$260" and container == "$141" and

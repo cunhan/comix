@@ -1,5 +1,3 @@
-from __future__ import (unicode_literals, division, absolute_import, print_function)
-
 import base64
 import io
 from lxml import etree
@@ -14,7 +12,7 @@ from .utilities import (Deserializer, disable_debug_log, type_name, urlrelpath)
 
 
 __license__ = "GPL v3"
-__copyright__ = "2016-2023, John Howell <jhowell@acm.org>"
+__copyright__ = "2016-2025, John Howell <jhowell@acm.org>"
 
 
 CREATE_SVG_FILES_IN_EPUB = True
@@ -63,16 +61,32 @@ class KFX_EPUB_Notebook(object):
     def process_scribe_notebook_page_section(self, section, page_template, section_name, seq):
         nmdl_canvas_width = section.pop("nmdl.canvas_width")
         nmdl_canvas_height = section.pop("nmdl.canvas_height")
+
+        if ((nmdl_canvas_width, nmdl_canvas_height) in [
+                (15624, 20832),
+                (13726, 7350)] or
+                nmdl_canvas_width in [3906, 13734] or
+                nmdl_canvas_width in [3066, 6132, 12264] or
+                nmdl_canvas_height > 15000):
+            pass
+        else:
+            log.warning("Unexpected nmdl.canvas width=%d height=%d" % (nmdl_canvas_width, nmdl_canvas_height))
+
         nmdl_normalized_ppi = section.pop("nmdl.normalized_ppi")
+        if nmdl_normalized_ppi != 2520:
+            log.error("Unexpected nmdl.normalized_ppi %d" % nmdl_normalized_ppi)
 
-        if (nmdl_canvas_width, nmdl_canvas_height, nmdl_normalized_ppi) not in [
-                (15624, 20832, 2520),
-                (13726, 7350, 2520)]:
-            log.error("Unexpected nmdl.canvas width=%d height=%d ppi=%d" % (
-                nmdl_canvas_width, nmdl_canvas_height, nmdl_normalized_ppi))
-
-        book_part = self.new_book_part(filename=self.NOTEBOOK_TEXT_FILEPATH % section_name)
+        book_part = self.new_book_part(filename=self.SECTION_TEXT_FILEPATH % section_name)
         book_part.is_fxl = True
+
+        book_part.nmdl_template_id = section.pop("nmdl.template_id", self.nmdl_template_id)
+        if book_part.nmdl_template_id is not None and book_part.nmdl_template_id != "$349" and (
+                len(self.reading_orders) != 2 or
+                self.reading_orders[1].get("$178", "") != "note_template_collection" or
+                book_part.nmdl_template_id not in self.reading_orders[1]["$170"]):
+            log.error("note_template_collection reading order does not contain nmdl.template_id %s used in section %s" % (
+                book_part.nmdl_template_id, section_name))
+
         add_meta_name_content(book_part.head(), "viewport", "width=%d, height=%d" % (
             nmdl_canvas_width, nmdl_canvas_height))
 
@@ -108,18 +122,27 @@ class KFX_EPUB_Notebook(object):
             body.append(page_svg_elem)
             html_svg_elem = page_svg_elem
 
-        self.add_style(html_svg_elem, {"height": "100%", "width": "100%"})
+        if "nmdl.inline_placement_type" in section:
+            inline_placement_type = section.pop("nmdl.inline_placement_type")
+            if inline_placement_type not in ["$670", "$669"]:
+                log.error("Unexpected nmdl.inline_placement_type: %s" % inline_placement_type)
 
-        if "$58" in section or "$59" in section:
-            section["$183"] = IS("$324")
             content_props = self.process_content_properties(section)
             self.add_style(html_svg_elem, content_props, replace=True)
+
+        else:
+            self.add_style(html_svg_elem, {"height": "100%", "width": "100%"})
+
+            if "$58" in section or "$59" in section:
+                section["$183"] = IS("$324")
+                content_props = self.process_content_properties(section)
+                self.add_style(html_svg_elem, content_props, replace=True)
 
     def process_scribe_notebook_template_section(self, section, page_template, section_name):
         nmdl_template_type = section.pop("nmdl.template_type")
         log.info("Notebook template: %s" % nmdl_template_type)
 
-        book_part = self.new_book_part(filename=self.NOTEBOOK_TEXT_FILEPATH % section_name)
+        book_part = self.new_book_part(filename=self.SECTION_TEXT_FILEPATH % section_name)
         book_part.is_fxl = True
         top_level_elem = book_part.html
         self.process_content(page_template, top_level_elem, book_part, self.writing_mode, is_section=True)
@@ -138,20 +161,19 @@ class KFX_EPUB_Notebook(object):
                 self.manifest_resource(template_svg_filename, data=svg_data)
                 book_part.omit = True
 
-                if section_name == self.nmdl_template_id:
-                    for page_book_part in self.book_parts:
-                        if page_book_part is not book_part:
-                            html_svg_elem = page_book_part.body().find(SVG)
-                            if html_svg_elem is not None:
-                                if len(html_svg_elem) == 3:
-                                    log.error("SVG image already has template in Scribe notebook page: %s" % page_book_part.filename)
-                                    html_svg_elem.remove(html_svg_elem[1])
+                for page_book_part in self.book_parts:
+                    if page_book_part.nmdl_template_id == section_name:
+                        html_svg_elem = page_book_part.body().find(SVG)
+                        if html_svg_elem is not None:
+                            if len(html_svg_elem) == 3:
+                                log.error("SVG image already has template in Scribe notebook page: %s" % page_book_part.filename)
+                                html_svg_elem.remove(html_svg_elem[1])
 
-                                html_svg_elem.insert(1, etree.Element("image", attrib={
-                                    "x": "0", "y": "0", "width": "100%", "height": "100%",
-                                    XLINK_HREF: urlrelpath(template_svg_filename, ref_from=book_part.filename)}))
-                            else:
-                                log.error("Failed to locate the SVG image within Scribe notebook page: %s" % page_book_part.filename)
+                            html_svg_elem.insert(1, etree.Element("image", attrib={
+                                "x": "0", "y": "0", "width": "100%", "height": "100%",
+                                XLINK_HREF: urlrelpath(template_svg_filename, ref_from=book_part.filename)}))
+                        else:
+                            log.error("Failed to locate the SVG image within Scribe notebook page: %s" % page_book_part.filename)
             else:
                 log.error("Failed to locate the SVG image within Scribe notebook template: %s" % book_part.filename)
 
@@ -282,13 +304,13 @@ class KFX_EPUB_Notebook(object):
                 log.error("Unexpected brush type %d" % nmdl_brush_type)
                 brush_name = UNKNOWN + str(nmdl_brush_type)
 
+            best_thickness_diff = 0.5
+            thickness_name = "%1.3f" % nmdl_thickness
             for thickness_index, thickness_choice in enumerate(THICKNESS_CHOICES.get(brush_name, [])):
-                if abs(thickness_choice - nmdl_thickness) / thickness_choice < 0.01:
+                thickness_diff = abs(thickness_choice - nmdl_thickness) / thickness_choice
+                if thickness_diff < best_thickness_diff:
                     thickness_name = THICKNESS_NAME[thickness_index]
-                    break
-            else:
-                log.warning("Unexpected thickness %s for %s" % (nmdl_thickness, brush_name))
-                thickness_name = "%1.3f" % nmdl_thickness
+                    best_thickness_diff = thickness_diff
 
             thickness = round(nmdl_thickness)
             last_x = last_y = None

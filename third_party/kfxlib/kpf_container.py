@@ -1,5 +1,3 @@
-from __future__ import (unicode_literals, division, absolute_import, print_function)
-
 import io
 import os
 import sqlite3
@@ -18,7 +16,7 @@ from .yj_container import ROOT_FRAGMENT_TYPES
 
 
 __license__ = "GPL v3"
-__copyright__ = "2016-2023, John Howell <jhowell@acm.org>"
+__copyright__ = "2016-2025, John Howell <jhowell@acm.org>"
 
 
 DEBUG = False
@@ -56,7 +54,7 @@ class KpfContainer(YJContainer):
 
                     elif ext == ".kdf-journal":
                         if len(zf.read(info)) > 0:
-                            raise Exception("kdf-journal is not empty in %s" % self.kpf_datafile.name)
+                            log.warning("kdf-journal is not empty in %s" % self.kpf_datafile.name)
 
                     elif ext == ".kcb":
                         self.kcb_datafile = DataFile(info.filename, zf.read(info), self.kpf_datafile)
@@ -147,7 +145,6 @@ class KpfContainer(YJContainer):
 
         ACTION_FRAGMENTS_SCHEMA = ("CREATE TABLE local_action_fragments(action_id char(40), payload_type char(10), payload_value blob, "
                                    "primary key (action_id))")
-
         if ACTION_FRAGMENTS_SCHEMA in schema:
             log.info("Found local_action_fragments table")
             schema.remove(ACTION_FRAGMENTS_SCHEMA)
@@ -155,49 +152,29 @@ class KpfContainer(YJContainer):
             for action_id, payload_type, payload_value in cursor.execute("SELECT * FROM local_action_fragments;"):
                 log.warning("Action: action_id=%s, payload_type=%s, payload_value=%s" % (action_id, payload_type, payload_value))
 
+        DELTA_FRAGMENTS_SCHEMA = ("CREATE TABLE local_delta_fragments(id char(40), payload_type char(10), payload_value blob, "
+                                  "deleted smallint, primary key (id))")
+        has_delta_fragments = DELTA_FRAGMENTS_SCHEMA in schema
+        if has_delta_fragments:
+            log.info("Found local_delta_fragments table")
+            schema.remove(DELTA_FRAGMENTS_SCHEMA)
+            self.book.is_scribe_notebook = True
+
         FRAGMENTS_SCHEMA = "CREATE TABLE fragments(id char(40), payload_type char(10), payload_value blob, primary key (id))"
         if FRAGMENTS_SCHEMA in schema:
-            extra_delta_fragments = []
-            DELTA_FRAGMENTS_SCHEMA = ("CREATE TABLE local_delta_fragments(id char(40), payload_type char(10), payload_value blob, "
-                                      "deleted smallint, primary key (id))")
-            if DELTA_FRAGMENTS_SCHEMA in schema:
-                log.info("Found local_delta_fragments table")
-                schema.remove(DELTA_FRAGMENTS_SCHEMA)
-                self.book.is_scribe_notebook = True
-
-                for id, payload_type, payload_value, deleted in list(cursor.execute(
-                        "SELECT * FROM local_delta_fragments;")):
-
-                    for id2, payload_type2, payload_value2 in cursor.execute(
-                            "SELECT * FROM fragments WHERE id = ? AND payload_type = ?;", (id, payload_type)):
-                        if id2 == id and payload_type2 == payload_type and payload_value2 == payload_value:
-                            found = True
-                            break
-                    else:
-                        found = False
-
-                    if deleted and found:
-                        log.error("Deleted delta fragment %s matches an existing fragment" % id)
-                    elif not (deleted or found):
-                        extra_delta_fragments.append((id, payload_type, payload_value))
-
-                if extra_delta_fragments:
-                    log.info("Adding %d missing fragments from local_delta_fragments" % len(extra_delta_fragments))
-
             schema.remove(FRAGMENTS_SCHEMA)
-            symtab_frags = list(cursor.execute("SELECT * FROM fragments WHERE id = '$ion_symbol_table' AND payload_type = 'blob';"))
-            symtab_frags.extend([f for f in extra_delta_fragments if f[0] == "$ion_symbol_table" and f[1] == "blob"])
-            symtab_frags.extend(list(cursor.execute("SELECT * FROM fragments WHERE id = 'max_id' AND payload_type = 'blob';")))
-            symtab_frags.extend([f for f in extra_delta_fragments if f[0] == "max_id" and f[1] == "blob"])
 
-            for id, payload_type, payload_value in symtab_frags:
-                self.process_db_fragment(id, payload_type, payload_value)
+            for condition in [" WHERE id = '$ion_symbol_table'", " WHERE id = 'max_id'", ""]:
+                delta_fragments = {}
+                if has_delta_fragments:
+                    for id, payload_type, payload_value, deleted in cursor.execute("SELECT * FROM local_delta_fragments%s;" % condition):
+                        delta_fragments[id] = (payload_type, payload_value)
+                        if not deleted:
+                            self.process_db_fragment(id, payload_type, payload_value)
 
-            for id, payload_type, payload_value in cursor.execute("SELECT * FROM fragments;"):
-                self.process_db_fragment(id, payload_type, payload_value)
-
-            for id, payload_type, payload_value in extra_delta_fragments:
-                self.process_db_fragment(id, payload_type, payload_value)
+                for id, payload_type, payload_value in cursor.execute("SELECT * FROM fragments%s;" % condition):
+                    if id not in delta_fragments:
+                        self.process_db_fragment(id, payload_type, payload_value)
         else:
             log.error("KPF database is missing the 'fragments' table")
 

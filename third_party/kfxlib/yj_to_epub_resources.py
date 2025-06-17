@@ -1,20 +1,16 @@
-from __future__ import (unicode_literals, division, absolute_import, print_function)
-
-import io
-from PIL import Image
 import posixpath
 import re
 import urllib.parse
 
 from .message_logging import log
 from .resources import (
-    EXTS_OF_MIMETYPE, combine_image_tiles, convert_jxr_to_tiff, convert_pdf_to_jpeg, font_file_ext,
+    EXTS_OF_MIMETYPE, combine_image_tiles, convert_jxr_to_jpeg_or_png, convert_pdf_to_jpeg, font_file_ext,
     image_file_ext, RESOURCE_TYPE_OF_EXT, SYMBOL_FORMATS)
-from .utilities import (disable_debug_log, root_filename, urlrelpath)
+from .utilities import (root_filename, urlrelpath)
 
 
 __license__ = "GPL v3"
-__copyright__ = "2016-2023, John Howell <jhowell@acm.org>"
+__copyright__ = "2016-2025, John Howell <jhowell@acm.org>"
 
 
 USE_HIGHEST_RESOLUTION_IMAGE_VARIANT = True
@@ -43,18 +39,11 @@ class KFX_EPUB_Resources(object):
 
         resource = self.get_fragment(ftype="$164", fid=resource_name)
 
-        if resource.pop("$175", "") != resource_name:
-            raise Exception("Name of resource %s is incorrect" % resource_name)
+        int_resource_name = resource.pop("$175", "")
+        if int_resource_name != resource_name:
+            log.error("Name of resource %s is incorrect: %s" % (resource_name, int_resource_name))
 
         resource_format = resource.pop("$161", None)
-
-        if resource_format in SYMBOL_FORMATS:
-            extension = "." + SYMBOL_FORMATS[resource_format]
-        else:
-            if resource_format is not None:
-                log.error("Resource %s has unknown format: %s" % (resource_name, resource_format))
-
-            extension = ".bin"
 
         fixed_height = resource.pop("$67", None)
         fixed_width = resource.pop("$66", None)
@@ -74,7 +63,7 @@ class KFX_EPUB_Resources(object):
                 for tile_location in row:
                     tiles_raw_media.append(self.locate_raw_media(tile_location))
 
-            raw_media = combine_image_tiles(
+            raw_media, resource_format = combine_image_tiles(
                 resource_name, resource_height, resource_width, resource_format, tile_height, tile_width, tile_padding,
                 yj_tiles, tiles_raw_media, ignore_variants)
         else:
@@ -87,6 +76,14 @@ class KFX_EPUB_Resources(object):
 
         if ignore_variants and raw_media is None:
             return None
+
+        if resource_format in SYMBOL_FORMATS:
+            extension = "." + SYMBOL_FORMATS[resource_format]
+        else:
+            if resource_format is not None:
+                log.error("Resource %s has unknown format: %s" % (resource_name, resource_format))
+
+            extension = ".bin"
 
         mime = resource.pop("$162", None)
 
@@ -111,6 +108,7 @@ class KFX_EPUB_Resources(object):
             location_fn = location_fn.partition(".")[0] + extension
 
         resource.pop("$597", None)
+        resource.pop("$70", None)
         resource.pop("$57", None)
         resource.pop("$56", None)
         resource.pop("$499", None)
@@ -123,21 +121,9 @@ class KFX_EPUB_Resources(object):
             self.process_external_resource(resource.pop("$214"), save=False)
 
         if FIX_JPEG_XR and (resource_format == "$548") and (raw_media is not None):
-            try:
-                tiff_data = convert_jxr_to_tiff(raw_media, location_fn)
-            except Exception as e:
-                log.error("Exception during conversion of JPEG-XR '%s' to TIFF: %s" % (location_fn, repr(e)))
-            else:
-                with disable_debug_log():
-                    img = Image.open(io.BytesIO(tiff_data))
-                    ofmt, extension, optimize = ("PNG", ".png", False) if img.mode == "RGBA" else ("JPEG", ".jpg", True)
-                    outfile = io.BytesIO()
-                    img.save(outfile, ofmt, quality=95, optimize=optimize)
-                    img.close()
-
-                raw_media = outfile.getvalue()
-                outfile.close()
-                location_fn = location_fn.rpartition(".")[0] + extension
+            raw_media, resource_format = convert_jxr_to_jpeg_or_png(raw_media, location_fn)
+            extension = "." + SYMBOL_FORMATS[resource_format]
+            location_fn = location_fn.rpartition(".")[0] + extension
 
         suffix = ""
         if resource_format == "$565" and raw_media is not None:
@@ -147,10 +133,11 @@ class KFX_EPUB_Resources(object):
             else:
                 page_num = 1
 
-            margin_left = resource.pop("$48", 0)
-            margin_right = resource.pop("$50", 0)
-            margin_top = resource.pop("$47", 0)
-            margin_bottom = resource.pop("$49", 0)
+            margin = resource.pop("$46", 0)
+            margin_left = resource.pop("$48", margin)
+            margin_right = resource.pop("$50", margin)
+            margin_top = resource.pop("$47", margin)
+            margin_bottom = resource.pop("$49", margin)
 
             if REPORT_PDF_MARGINS:
                 log.info("resource %s, pdf page %d, width=%d pt, height=%d pt, margins=%s" % (
@@ -351,7 +338,7 @@ class KFX_EPUB_Resources(object):
                 return self.anchor_as_uri(anchor)
             else:
                 log.error("Failed to locate anchor for %s" % uri)
-                return "/MISSING_NAVTO#%s_%s" % (urllib.parse.unquote(purl.netloc), purl.fragment)
+                return "/MISSING_NAVTO_%s%s%s" % (urllib.parse.unquote(purl.netloc), "_" if purl.fragment else "", purl.fragment)
 
         if purl.scheme in ["http", "https"]:
             if manifest_external_refs:

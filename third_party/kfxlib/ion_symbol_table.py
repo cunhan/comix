@@ -1,5 +1,3 @@
-from __future__ import (unicode_literals, division, absolute_import, print_function)
-
 import re
 
 from .ion import (ion_type, isstring, IonAnnotation, IonStruct, IonSymbol, IS, unannotated)
@@ -9,7 +7,7 @@ from .yj_symbol_catalog import (IonSharedSymbolTable, SYSTEM_SYMBOL_TABLE, YJ_SY
 
 
 __license__ = "GPL v3"
-__copyright__ = "2016-2023, John Howell <jhowell@acm.org>"
+__copyright__ = "2016-2025, John Howell <jhowell@acm.org>"
 
 DEBUG = False
 REPORT_ALL_USED_SYMBOLS = False

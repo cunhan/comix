@@ -1,5 +1,3 @@
-from __future__ import (unicode_literals, division, absolute_import, print_function)
-
 import copy
 from lxml import etree
 import math
@@ -16,7 +14,7 @@ from .yj_to_epub_properties import (REVERSE_HERITABLE_PROPERTIES)
 
 
 __license__ = "GPL v3"
-__copyright__ = "2016-2023, John Howell <jhowell@acm.org>"
+__copyright__ = "2016-2025, John Howell <jhowell@acm.org>"
 
 FIX_WIDE_UNICODE_OFFSETS = False
 CONSOLIDATE_HTML = True
@@ -27,6 +25,7 @@ INCLUDE_HERO_IMAGE_PROPERTIES = True
 SKIP_FIT_WIDTH_FOR_IMAGES = True
 ROUND_TRIP_ORIGINAL_STORIES = False
 COMBINE_NESTED_DIVS = True
+RETAIN_SECTION_FILENAMES = True
 
 LIST_STYLE_TYPES = {
     "$346": "ol",
@@ -168,7 +167,8 @@ class KFX_EPUB_Content(object):
                         page_template.pop("$159")
                         page_template.pop("$156")
 
-                        book_part = self.new_book_part()
+                        book_part = self.new_book_part(
+                            filename=self.SECTION_TEXT_FILEPATH % section_name if RETAIN_SECTION_FILENAMES else None)
                         self.link_css_file(book_part, self.STYLES_CSS_FILEPATH)
                         self.add_content(page_template, book_part.html, book_part, self.writing_mode, layout)
                         self.process_position(self.get_location_id(page_template), 0, book_part.body())
@@ -187,7 +187,8 @@ class KFX_EPUB_Content(object):
                 log.error("%s has %d active conditional page templates" % (self.content_context, templates_processed))
 
         else:
-            book_part = self.new_book_part()
+            book_part = self.new_book_part(
+                filename=self.SECTION_TEXT_FILEPATH % section_name if RETAIN_SECTION_FILENAMES else None)
             self.process_content(page_templates[-1], book_part.html, book_part, self.writing_mode, is_section=True)
 
             self.link_css_file(book_part, self.STYLES_CSS_FILEPATH)
@@ -230,7 +231,7 @@ class KFX_EPUB_Content(object):
             page_template.pop("$140", None)
             page_template.pop("$560", None)
 
-            parent_template_id = page_template.pop("$155", None) or page_template.pop("$598")
+            parent_template_id = self.get_location_id(page_template)
             story = self.get_named_fragment(page_template, ftype="$259")
             story_name = story.pop("$176")
             if self.DEBUG:
@@ -278,7 +279,7 @@ class KFX_EPUB_Content(object):
             if font_size != 16:
                 log.warning("Unexpected font size in PDF backed scale_fit page template: %s" % font_size)
 
-            parent_template_id = page_template.pop("$155", None) or page_template.pop("$598")
+            parent_template_id = self.get_location_id(page_template)
             story = self.get_named_fragment(page_template, ftype="$259")
             story_name = story.pop("$176")
             if self.DEBUG:
@@ -303,7 +304,7 @@ class KFX_EPUB_Content(object):
             if connected_pagination != 2:
                 log.error("Unexpected connected_pagination: %d" % connected_pagination)
 
-            parent_template_id = page_template.pop("$155", None) or page_template.pop("$598")
+            parent_template_id = self.get_location_id(page_template)
             story = self.get_named_fragment(page_template, ftype="$259")
             story_name = story.pop("$176")
             if self.DEBUG:
@@ -320,12 +321,16 @@ class KFX_EPUB_Content(object):
             self.check_empty(story, "story %s" % story_name)
 
         else:
-            book_part = self.new_book_part(opf_properties=set(page_spread.split()))
+            spread_type = page_spread.replace("rendition:", "").replace("page-spread-", "")
+            unique_section_name = "%s-%s" % (section_name, spread_type) if spread_type else section_name
+            book_part = self.new_book_part(
+                filename=self.SECTION_TEXT_FILEPATH % unique_section_name if RETAIN_SECTION_FILENAMES else None,
+                opf_properties=set(page_spread.split()))
             self.process_content(page_template, book_part.html, book_part, self.writing_mode, is_section=is_section)
             self.link_css_file(book_part, self.STYLES_CSS_FILEPATH)
 
             if parent_template_id is not None:
-                self.process_position(str(parent_template_id), 0, book_part.body())
+                self.process_position(parent_template_id, 0, book_part.body())
 
         self.check_empty(page_template, "Section %s page_template" % section_name)
 
@@ -353,7 +358,7 @@ class KFX_EPUB_Content(object):
                 text_elem.text = text
             except Exception:
                 if not self.is_print_replica:
-                    log.error("%s has invalid text content: %s" % (self.content_context, escape_string(text)))
+                    log.warning("%s has invalid text content: %s" % (self.content_context, escape_string(text)))
 
                 text_elem.text = self.clean_text_for_lxml(text)
 
@@ -672,8 +677,8 @@ class KFX_EPUB_Content(object):
                         activate_elem.set("class", "app-amzn-magnify")
 
                         activate_elem.set("data-app-amzn-magnify", json_serialize_compact(OD(
-                                "targetId", self.register_link_id(str(activate.pop("$163")), "magnify_target"),
-                                "sourceId", self.register_link_id(str(activate.pop("$474")), "magnify_source"),
+                                "targetId", self.register_link_id(activate.pop("$163"), "magnify_target"),
+                                "sourceId", self.register_link_id(activate.pop("$474"), "magnify_source"),
                                 "ordinal", ordinal)))
 
                         self.check_empty(activate, "%s activate" % self.content_context)
@@ -695,6 +700,14 @@ class KFX_EPUB_Content(object):
             if "$104" in content:
                 content_elem.set("start", str(content.pop("$104")))
 
+            if "$102" in content:
+                list_indent_style = self.convert_yj_properties({"$53": content.pop("$102")})
+                if list_indent_style != self.Style({"padding-left": "0"}):
+                    try:
+                        self.add_style(content_elem, list_indent_style, replace=Exception)
+                    except Exception:
+                        log.error("Could not add list_indent since listalready has padding-left")
+
             self.add_content(content, content_elem, book_part, writing_mode)
 
         elif content_type == "$277":
@@ -714,7 +727,6 @@ class KFX_EPUB_Content(object):
                     except Exception:
                         try:
                             self.add_style(content_elem, list_indent_style, replace=Exception)
-                            log.info("added list_indent to content_elem")
                         except Exception:
                             log.error("Could not add list_indent since parent and listitem both already have padding-left")
 
@@ -841,7 +853,7 @@ class KFX_EPUB_Content(object):
             self.add_content(content, content_elem, book_part, writing_mode)
 
         if "$754" in content:
-            self.register_link_id(str(content.pop("$754")), "main_content")
+            self.register_link_id(content.pop("$754"), "main_content")
 
         if "$683" in content:
             for annotation in content.pop("$683"):
@@ -868,7 +880,7 @@ class KFX_EPUB_Content(object):
                             self.move_anchors(svg, mathml)
                         else:
                             desc = etree.Element(qname(SVG_NS_URI, "desc"))
-                            desc.text = annotation_text
+                            desc.text = re.sub(" amzn-src-id=\"[0-9]+\"", "", annotation_text)
                             svg.insert(0 if svg[0].tag != "title" else 1, desc)
 
                         if ("$56" in content and
@@ -885,19 +897,19 @@ class KFX_EPUB_Content(object):
                 elif annotation_type == "$749" and content_type == "$278":
                     alt_content_story = self.get_named_fragment(annotation, ftype="$259", name_symbol="$749")
 
-                    include_condition = annotation.pop("$592")
+                    condition = annotation.pop("$592")
 
                     if (
-                        include_condition != IonSExp(
+                        condition != IonSExp(
                             ["$292", IonSExp(["$293", IonSExp(["$659", "$751"])]),
                              IonSExp(["$750", "$752"])])) and (
-                        include_condition != IonSExp(
+                        condition != IonSExp(
                             ["$292", IonSExp(["$293", IonSExp(["$659", "$751"])]),
                              IonSExp(["$750", "$753"])])):
                         log.warning("%s alt_content contains unexpected include condition: %s" % (
-                            self.content_context, repr(include_condition)))
+                            self.content_context, repr(condition)))
 
-                    if self.evaluate_condition(include_condition):
+                    if self.evaluate_binary_condition(condition):
                         alt_content_elem = etree.Element("div")
                         self.process_story(alt_content_story, alt_content_elem, book_part, writing_mode)
                         content_elem = alt_content_elem[0]
@@ -953,22 +965,30 @@ class KFX_EPUB_Content(object):
             else:
                 log.warning("Unexpected word_boundary_list length: %s" % str(word_boundary_list))
 
-        if self.illustrated_layout:
-            if "$591" in content:
-                condition = content.pop("$591")
-                if (ion_type(condition) is IonSExp and len(condition) == 2 and
-                        condition[0] == "$659" and condition[1] == "$660"):
-                    discard = True
-                else:
-                    log.error("Unexpected condition for KIM exclude: %s" % repr(condition))
+        if "$591" in content:
+            condition = content.pop("$591")
 
-            if "$592" in content:
-                condition = content.pop("$592")
-                if (ion_type(condition) is IonSExp and len(condition) == 2 and
-                        condition[0] == "$659" and condition[1] == "$660"):
-                    self.add_style(content_elem, {"-kfx-attrib-epub-type": "amzn:kindle-illustrated"})
-                else:
-                    log.error("Unexpected condition for KIM include: %s" % repr(condition))
+            if (condition == IonSExp(["$659", "$827"]) or condition == IonSExp(["$659", "$826"]) or
+                    (self.illustrated_layout and condition == IonSExp(["$659", "$660"]))):
+                pass
+            else:
+                log.error("%s has unexpected condition for exclude: %s" % (self.content_context, repr(condition)))
+
+            if self.evaluate_binary_condition(condition):
+                discard = True
+
+        if "$592" in content:
+            condition = content.pop("$592")
+
+            if condition == IonSExp(["$659", "$827"]) or condition == IonSExp(["$659", "$826"]):
+                pass
+            elif self.illustrated_layout and condition == IonSExp(["$659", "$660"]):
+                self.add_style(content_elem, {"-kfx-attrib-epub-type": "amzn:kindle-illustrated"})
+            else:
+                log.error("%s has unexpected condition for include: %s" % (self.content_context, repr(condition)))
+
+            if not self.evaluate_binary_condition(condition):
+                discard = True
 
         if "$663" in content:
 
@@ -1124,47 +1144,41 @@ class KFX_EPUB_Content(object):
                     if ruby_offset != next_ruby_offset:
                         log.error("Unexpected ruby offset %d, expected %d" % (ruby_offset, next_ruby_offset))
 
-                    if ruby_offset == 0 and ruby_length == event_length and False:
-                        rb_elem = event_elem[0]
-                    else:
-                        rb_elem = self.find_or_create_style_event_element(event_elem, ruby_offset, ruby_length)
-                        if rb_elem is None:
-                            break
+                    rb_elem = self.find_or_create_style_event_element(event_elem, ruby_offset, ruby_length)
+                    if rb_elem is None:
+                        break
 
-                        while rb_elem.getparent() is not event_elem:
-                            if len(rb_elem.getparent()) != 1:
-                                rb_elem.tag = "rb-bad"
-                                raise Exception("rb element not a child of ruby element: %s" % etree.tostring(event_elem))
-
-                            rb_elem = rb_elem.getparent()
+                    rb_parent = rb_elem.getparent()
+                    while rb_parent is not event_elem and len(rb_parent) == 1:
+                        rb_elem = rb_parent
+                        rb_parent = rb_elem.getparent()
 
                     rb_elem = self.replace_element_with_container(rb_elem, "rb")
 
                     ruby_id = ruby_id_entry.pop("$758")
                     ruby_content = self.get_ruby_content(ruby_name, ruby_id)
+                    ruby_content.pop("$758")
 
-                    if ruby_content.pop("$159") == "$269":
-                        rt_elem = etree.Element("rt")
-                        event_elem.insert(event_elem.index(rb_elem) + 1, rt_elem)
+                    temp_rt_elem = etree.Element("div")
+                    self.process_content(ruby_content, temp_rt_elem, book_part, writing_mode)
 
-                        rt_span = etree.SubElement(rt_elem, "span")
-                        rt_span.text = ruby_content.pop("$145", "")
-
-                        self.add_kfx_style(ruby_content, ruby_content.pop("$157", None))
-
-                        rt_style = self.process_content_properties(ruby_content)
+                    for rt_child in temp_rt_elem.iterfind("*"):
+                        rt_style = self.get_style(rt_child)
                         if rt_style.get("font-size") == "0.5em":
                             rt_style.pop("font-size")
+                            self.set_style(rt_child, rt_style)
 
-                        self.add_style(rt_elem, rt_style)
+                    if len(temp_rt_elem) == 1 and temp_rt_elem[0].tag == "div":
+                        rt_elem = temp_rt_elem[0]
+                        temp_rt_elem.remove(rt_elem)
                     else:
-                        log.error("Unexpected ruby_content type: %s" % ruby_content["$159"])
+                        log.error("Unexpected rt content: %s" % etree.tostring(temp_rt_elem))
+                        rt_elem = temp_rt_elem
 
-                    ruby_content.pop("$758")
-                    ruby_content.pop("$155", None)
-                    ruby_content.pop("$598", None)
-                    ruby_content.pop("yj.conversion.offset_map", None)
-                    self.check_empty(ruby_content, "ruby_content %s %d" % (ruby_name, ruby_id))
+                    rt_elem.tag = "rt"
+
+                    rb_parent = rb_elem.getparent()
+                    rb_parent.insert(rb_parent.index(rb_elem) + 1, rt_elem)
 
                     self.check_empty(ruby_id_entry, "ruby_id_entry")
                     next_ruby_offset += ruby_length
@@ -1245,7 +1259,7 @@ class KFX_EPUB_Content(object):
                 else:
                     content_style.pop("width")
 
-        if book_part.is_fxl and content_style.get("position", "static") == "static":
+        if book_part is not None and book_part.is_fxl and content_style.get("position", "static") == "static":
             for positioning in ["top", "bottom", "left", "right"]:
                 if positioning in content_style:
                     content_style["position"] = "absolute"
@@ -1378,18 +1392,37 @@ class KFX_EPUB_Content(object):
 
         if COMBINE_NESTED_DIVS:
             if (content_elem.tag == "div" and (not content_elem.text) and len(content_elem) == 1 and
-                    content_style.get("display", "block") == "block"):
+                    content_style.get("display", "block") == "block" and content_style.get("position", "static") == "static" and
+                    content_style.get("float", "none") == "none" and
+                    len(set(content_elem.attrib.keys()) - {"id", "style"}) == 0):
                 child = content_elem[0]
-                if child.tag == "div" and (not child.tail) and len(set(child.attrib.keys()) - {"style"}) == 0:
+                if child.tag == "div" and (not child.tail) and len(set(child.attrib.keys()) - {"id", "style"}) == 0:
                     child_sty = self.get_style(child)
-                    if (child_sty.get("display", "block") == "block" and
-                            not ((set(content_style.keys()) & set(child_sty.keys())) - {"-kfx-style-name"})):
-                        content_style.update(child_sty, replace=False)
-                        content_elem.remove(child)
-                        content_elem.text = child.text
-                        for cc in child:
-                            child.remove(cc)
-                            content_elem.append(cc)
+                    if (child_sty.get("display", "block") == "block" and child_sty.get("position", "static") == "static" and
+                            child_sty.get("float", "none") == "none" and
+                            (not ((set(content_style.keys()) & set(child_sty.keys())) - {"-kfx-style-name"})) and
+                            (not (("id" in content_elem.attrib or self.illustrated_layout) and "id" in child.attrib))):
+                        do_merge = True
+                        if is_top_level:
+                            for grandchild in child:
+                                if grandchild.tag not in {
+                                        "blockquote", "del", "div", "dl", "h1", "h2", "h3", "h4", "h5", "h6",
+                                        "hr", "ins", SVG, "ol", "p", "pre", "table", "ul"}:
+                                    do_merge = False
+                                    break
+
+                        if do_merge:
+                            content_style.update(child_sty, replace=False)
+
+                            if "id" in content_elem.attrib:
+                                content_elem.remove(child)
+                                content_elem.text = child.text
+                                for grandchild in child:
+                                    child.remove(grandchild)
+                                    content_elem.append(grandchild)
+                            else:
+                                content_elem.remove(child)
+                                content_elem = child
 
         self.set_style(content_elem, content_style)
 
@@ -1636,7 +1669,7 @@ class KFX_EPUB_Content(object):
         else:
             if elem.tag not in {
                     "aside", "body", "br", "caption", "col", "colgroup", "desc", "div", "figure", "h1", "h2", "h3", "h4", "h5", "h6",
-                    "hr", IDX_ENTRY, "li", "nav", "p", "table", "tbody", "td", "text", "thead", "title", "tr", "ul", "ol"}:
+                    "hr", IDX_ENTRY, "li", "nav", "p", "table", "tbody", "td", "text", "tfoot", "thead", "title", "tr", "ul", "ol"}:
                 log.warning("Unexpected block start tag in preformat_spaces: %s" % elem.tag)
 
             self.reset_preformat()

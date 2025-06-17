@@ -1,5 +1,3 @@
-from __future__ import (unicode_literals, division, absolute_import, print_function)
-
 import collections
 import copy
 import decimal
@@ -9,7 +7,7 @@ from .epub_output import (EPUB_Output)
 
 from .ion import (ion_type, IonAnnotation, IonList, IonSExp, IonString, IonStruct, IonSymbol)
 from .message_logging import log
-from .utilities import (check_empty, list_symbols, truncate_list, UUID_MATCH_RE)
+from .utilities import (check_empty, list_symbols, UUID_MATCH_RE)
 from .yj_structure import SYM_TYPE
 from .yj_to_epub_content import KFX_EPUB_Content
 from .yj_to_epub_illustrated_layout import KFX_EPUB_Illustrated_Layout
@@ -22,10 +20,8 @@ from .yj_to_epub_resources import KFX_EPUB_Resources
 
 
 __license__ = "GPL v3"
-__copyright__ = "2016-2023, John Howell <jhowell@acm.org>"
+__copyright__ = "2016-2025, John Howell <jhowell@acm.org>"
 
-
-REPORT_MISSING_FONTS = True
 
 RETAIN_USED_FRAGMENTS = False
 RETAIN_UNUSED_RESOURCES = False
@@ -43,6 +39,9 @@ FRAGMENT_NAME_SYMBOL = {
     }
 
 
+PROGRESS_FTYPES = {"$260", "$259", "$164"}
+
+
 class KFX_EPUB(
         KFX_EPUB_Content, KFX_EPUB_Illustrated_Layout, KFX_EPUB_Metadata, KFX_EPUB_Misc,
         KFX_EPUB_Navigation, KFX_EPUB_Notebook, KFX_EPUB_Properties, KFX_EPUB_Resources,
@@ -50,7 +49,7 @@ class KFX_EPUB(
 
     DEBUG = False
 
-    def __init__(self, book, epub2_desired=False, force_cover=False):
+    def __init__(self, book, epub2_desired=False, force_cover=False, metadata_only=False, progress=None):
         decimal.getcontext().prec = 6
         KFX_EPUB_Content.__init__(self)
         KFX_EPUB_Illustrated_Layout.__init__(self)
@@ -60,7 +59,7 @@ class KFX_EPUB(
         KFX_EPUB_Notebook.__init__(self)
         KFX_EPUB_Properties.__init__(self)
         KFX_EPUB_Resources.__init__(self)
-        EPUB_Output.__init__(self, epub2_desired, force_cover)
+        EPUB_Output.__init__(self, epub2_desired, force_cover, not metadata_only)
 
         self.book = book
         self.book_symbols = set()
@@ -69,16 +68,24 @@ class KFX_EPUB(
         self.book_has_illustrated_layout_conditional_page_template = book.has_illustrated_layout_conditional_page_template
         self.used_fragments = {}
 
+        self.progress = progress
+        if self.progress is not None:
+            self.progress_limit = self.progress_countdown()
+            self.progress.set_limit(self.progress_limit)
+
         self.determine_book_symbol_format()
         self.process_content_features()
+        self.process_fonts()
         self.process_document_data()
         self.process_metadata()
-        self.process_fonts()
 
         self.set_condition_operators()
 
         self.process_anchors()
         self.process_navigation()
+
+        if metadata_only:
+            return
 
         for style_name, yj_properties in self.book_data.get("$157", {}).items():
             self.check_fragment_name(yj_properties, "$157", style_name, delete=False)
@@ -95,14 +102,7 @@ class KFX_EPUB(
         self.fixup_styles_and_classes()
         self.create_css_files()
         self.prepare_book_parts()
-
-        if self.position_anchors:
-            pos = []
-            for id in self.position_anchors:
-                for offset in self.position_anchors[id]:
-                    pos.append("%s.%s" % (id, offset))
-
-            log.error("Failed to locate %d referenced positions: %s" % (len(pos), ", ".join(truncate_list(sorted(pos)))))
+        self.report_missing_positions()
 
         if RETAIN_UNUSED_RESOURCES:
             for external_resource in self.book_data.get("$164", {}):
@@ -133,7 +133,6 @@ class KFX_EPUB(
         self.book_data.pop("$270", None)
         self.book_data.pop("$593", None)
         self.book_data.pop("$ion_symbol_table", None)
-        self.book_data.pop("$270", None)
         self.book_data.pop("$419", None)
         self.book_data.pop("$145", None)
         self.book_data.pop("$608", None)
@@ -167,14 +166,12 @@ class KFX_EPUB(
 
         self.check_empty(self.book_data, "Book fragments")
 
-        if self.missing_font_names:
-            if REPORT_MISSING_FONTS:
-                log.warning("Missing font family names: %s" % list_symbols(self.missing_font_names))
-            else:
-                log.info("Missing referenced font family names: %s" % list_symbols(self.missing_font_names))
+        missing_font_names = self.used_font_names - self.present_font_names
+        if missing_font_names:
+            log.warning("Missing font family names: %s" % list_symbols(missing_font_names))
 
-            if self.font_names:
-                log.info("Present referenced font family names: %s" % list_symbols(self.font_names))
+            if self.present_font_names:
+                log.info("Present referenced font family names: %s" % list_symbols(self.present_font_names))
 
     def decompile_to_epub(self):
         return self.generate_epub()
@@ -322,17 +319,14 @@ class KFX_EPUB(
         data_name = self.get_fragment_name(data, ftype, delete=False)
         if data_name and data_name != fid:
             log.error("Expected %s named %s but found %s" % (ftype, fid, data_name))
+
+        if ftype in PROGRESS_FTYPES:
+            self.update_progress()
+
         return data
 
     def get_named_fragment(self, structure, ftype=None, delete=True, name_symbol=None):
         return self.get_fragment(ftype=ftype, fid=structure.pop(name_symbol or FRAGMENT_NAME_SYMBOL[ftype]), delete=delete)
-
-    def get_location_id(self, structure):
-        id = structure.pop("$155", None) or structure.pop("$598", None)
-        if id is not None:
-            id = str(id)
-
-        return id
 
     def check_fragment_name(self, fragment_data, ftype, fid, delete=True):
         name = self.get_fragment_name(fragment_data, ftype, delete)
@@ -347,3 +341,13 @@ class KFX_EPUB(
 
     def check_empty(self, a_dict, dict_name):
         check_empty(a_dict, dict_name)
+
+    def progress_countdown(self):
+        count = 0
+        for ftype in PROGRESS_FTYPES:
+            count += len(self.book_data.get(ftype, []))
+        return count
+
+    def update_progress(self):
+        if self.progress is not None:
+            self.progress.update_count(round((self.progress_limit - self.progress_countdown()) * 0.95))

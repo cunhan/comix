@@ -1,5 +1,3 @@
-from __future__ import (unicode_literals, division, absolute_import, print_function)
-
 import atexit
 import base64
 import collections
@@ -28,12 +26,13 @@ from .message_logging import log
 
 try:
     from calibre.constants import numeric_version as calibre_numeric_version
+    from calibre.utils.config_base import tweaks
 except ImportError:
     calibre_numeric_version = None
 
 
 __license__ = "GPL v3"
-__copyright__ = "2016-2023, John Howell <jhowell@acm.org>"
+__copyright__ = "2016-2025, John Howell <jhowell@acm.org>"
 
 
 MAX_TEMPDIR_REMOVAL_TRIES = 60
@@ -133,6 +132,10 @@ def natural_sort_key(s):
     return "".join(["00000000"[len(c):] + c if c.isdigit() else c for c in re.split(r"([0-9]+)", s.lower())])
 
 
+def list_counts(a_dict):
+    return list_symbols(["%d %s" % (v if isinstance(v, int) else len(v), k) for k, v in a_dict.items()])
+
+
 def list_keys(a_dict):
     return list_symbols(a_dict.keys())
 
@@ -150,7 +153,7 @@ def list_truncated(a_iter, max_allowed=10):
 
 
 def unicode_list(lst):
-    return [str(s) for s in lst]
+    return [str(s) if s else "''" for s in lst]
 
 
 def truncate_list(lst, max_allowed=10):
@@ -305,7 +308,11 @@ def urlrelpath(url, ref_from=None, working_dir=None, quote=True):
     if ref_from is not None:
         working_dir = dirname(ref_from)
 
-    purl = urllib.parse.urlparse(url, INTERNAL_FILE_SCHEME)
+    try:
+        purl = urllib.parse.urlparse(url, INTERNAL_FILE_SCHEME)
+    except Exception:
+        return url
+
     if purl.scheme != INTERNAL_FILE_SCHEME or purl.netloc != "":
         return url
 
@@ -400,6 +407,9 @@ def wine_user_dir(local_appdata=False, appdata=False):
 
 
 def wineprefix():
+    kfx_output_wineprefix = tweaks.get("kfx_output_wineprefix")
+    if kfx_output_wineprefix:
+        return kfx_output_wineprefix
     return os.getenv("WINEPREFIX") or os.path.join(os.getenv("HOME"), ".wine")
 
 
@@ -417,20 +427,6 @@ def wine_userreg():
             "Wine registry file %s not found. Ensure that Wine is correctly installed and that calibre is not "
             "installed within a separate container.") % userreg)
     return userreg
-
-
-def wine_arch():
-    with io.open(wine_userreg(), "r") as file:
-        for line in file:
-            if line.startswith("#arch"):
-                if "64" in line:
-                    return "64"
-                else:
-                    return "32"
-
-
-def wine_executable():
-    return "wine64" if wine_arch() == "64" else "wine"
 
 
 def unicode_argv(argv):
@@ -555,17 +551,21 @@ class DataFile(object):
         if isinstance(name_or_stream, str):
             self.stream = None
             self.relname = name_or_stream
-            self.is_real_file = data is None
+            self.is_real_file = data is None and parent is None
+        elif hasattr(name_or_stream, "name"):
+            self.stream = name_or_stream
+            self.relname = name_or_stream.name
+            self.is_real_file = os.path.isfile(name_or_stream.name)
         else:
             self.stream = name_or_stream
-            self.relname = self.stream.name if hasattr(self.stream, "name") else "stream"
+            self.relname = "unknown"
             self.is_real_file = False
 
         self.data = data
         self.parent = parent
 
         self.name = self.relname
-        self.ext = os.path.splitext(self.relname)[1]
+        self.ext = os.path.splitext(self.relname)[1].lower()
 
     def get_data(self):
         if self.data is None:
@@ -642,6 +642,24 @@ def sha1(data):
 
 def sha256(data):
     return hashlib.sha256(data).digest()
+
+
+def plugin_modules_path():
+    if __file__ == "<calibre Plugin Loader>":
+        return sys.path[0] + "/kfxlib/calibre-plugin-modules"
+
+    return __file__.rpartition("/")[0] + "/calibre-plugin-modules"
+
+
+def add_plugin_path():
+    sys.path.insert(0, plugin_modules_path())
+
+
+def remove_plugin_path():
+    try:
+        sys.path.remove(plugin_modules_path())
+    except ValueError:
+        pass
 
 
 ENABLE_WIDE_UNICODE_HANDLING = True
@@ -774,3 +792,31 @@ class Deserializer(object):
 
     def __len__(self):
         return len(self.buffer) - self.offset
+
+
+class CONVERSION_PROGRESS(object):
+    def __init__(self, progress_fn):
+        self.progress_fn = progress_fn
+        self.pct_complete = 0
+        self.limit = None
+        self.count = 0
+
+    def set_limit(self, limit):
+        self.limit = limit
+
+    def increment_count(self):
+        self.update_count(self.count + 1)
+
+    def update_count(self, count):
+        self.count = count
+        if self.limit:
+            self.pct_complete = max(min((self.count * 100) // self.limit, 100), 0)
+            self.report()
+
+    def report(self):
+        if self.progress_fn is not None:
+            self.progress_fn(self.pct_complete)
+
+
+def make_progress(progress_fn):
+    return CONVERSION_PROGRESS(progress_fn) if progress_fn is not None else None

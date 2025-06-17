@@ -1,30 +1,33 @@
-from __future__ import (unicode_literals, division, absolute_import, print_function)
-
-
 import io
 import os
 from PIL import Image
 import time
-import zipfile
-
-try:
-    import pypdf
-except ImportError:
-    try:
-        from . import pypdf
-    except ImportError:
-        pypdf = None
 
 from .jxr_container import JXRContainer
 from .message_logging import log
-from .utilities import (calibre_numeric_version, create_temp_dir, disable_debug_log, list_symbols, temp_filename)
+from .utilities import (
+    add_plugin_path, calibre_numeric_version, create_temp_dir, disable_debug_log, natural_sort_key,
+    remove_plugin_path, temp_filename)
+
+if calibre_numeric_version is not None:
+    add_plugin_path()
+    import pypdf
+    remove_plugin_path()
+else:
+    import pypdf
 
 
-MIN_JPEG_QUALITY = 80
+__license__ = "GPL v3"
+__copyright__ = "2016-2025, John Howell <jhowell@acm.org>"
+
+COMBINE_TILES_LOSSLESS = True
+MIN_JPEG_QUALITY = 90
 MAX_JPEG_QUALITY = 100
 COMBINED_TILE_SIZE_FACTOR = 1.2
-TILE_SIZE_REPORT_PERCENTAGE = 20
+TILE_SIZE_REPORT_PERCENTAGE = 10
 DEBUG_TILES = False
+
+CONVERT_JXR_LOSSLESS = False
 
 IMAGE_COLOR_MODES = [
     "1",
@@ -55,6 +58,7 @@ for k, v in FORMAT_SYMBOLS.items():
 
 
 MIMETYPE_OF_EXT = {
+    ".aax": "audio/vnd.audible.aax",
     ".apnx": "application/x-apnx-sidecar",
     ".bin": "application/octet-stream",
     ".bmp": "image/bmp",
@@ -123,6 +127,7 @@ RESOURCE_TYPE_OF_EXT = {
     ".txt": "text",
     ".webp": "video",
     ".woff": "font",
+    ".woff2": "font",
     }
 
 EXTS_OF_MIMETYPE = {
@@ -179,6 +184,7 @@ EXTS_OF_MIMETYPE = {
     "audio/mp3": [".mp4"],
     "audio/mp4": [".mp4"],
     "audio/mpeg": [".mp3"],
+    "audio/vnd.audible.aax": [".aax"],
     "figure": [".figure"],
     "font/otf": [".otf"],
     "font/ttf": [".ttf"],
@@ -218,23 +224,61 @@ EXTS_OF_MIMETYPE = {
 
 
 class ImageResource(object):
-    def __init__(self, format, location, raw_media, height=None, width=None, png_from_jpg=False):
+    def __init__(self, format, location, raw_media, height=None, width=None):
         self.format = format
         self.location = location
         self.raw_media = raw_media
         self.height = height
         self.width = width
-        self.png_from_jpg = png_from_jpg
 
 
 class PdfImageResource(ImageResource):
-    def __init__(self, location, raw_media, page_index, total_pages, png_from_jpg=False):
-        ImageResource.__init__(self, "$565", location, raw_media, png_from_jpg=png_from_jpg)
+    def __init__(self, location, raw_media, page_index, total_pages):
+        ImageResource.__init__(self, "$565", location, raw_media)
         self.page_nums = [page_index + 1]
         self.total_pages = total_pages
 
     def entire_resource_used(self):
         return self.page_nums == list(range(1, self.total_pages + 1))
+
+    def page_number_ranges(self):
+        ranges = []
+        start = end = None
+
+        for page_num in self.page_nums:
+            if start is None:
+                start = end = page_num
+            elif page_num == end + 1:
+                end = page_num
+            else:
+                ranges.append((start, end + 1))
+                start = end = page_num
+
+        if start is not None:
+            ranges.append((start, end + 1))
+
+        return ranges
+
+
+def convert_jxr_to_jpeg_or_png(jxr_data, resource_name, return_mime=False):
+    try:
+        image_data = convert_jxr_to_tiff(jxr_data, resource_name)
+    except Exception as e:
+        log.error("Exception during conversion of JPEG-XR '%s' to TIFF: %s" % (resource_name, repr(e)))
+        image_data = jxr_data
+        image_type = "$548"
+    else:
+        with disable_debug_log():
+            img = Image.open(io.BytesIO(image_data))
+            image_type, ofmt, optimize = ("$284", "PNG", False) if CONVERT_JXR_LOSSLESS or img.mode == "RGBA" else ("$285", "JPEG", True)
+            outfile = io.BytesIO()
+            img.save(outfile, ofmt, quality=95, optimize=optimize)
+            img.close()
+
+        image_data = outfile.getvalue()
+        outfile.close()
+
+    return image_data, MIMETYPE_OF_EXT["." + SYMBOL_FORMATS[image_type]] if return_mime else image_type
 
 
 def convert_jxr_to_tiff(jxr_data, resource_name):
@@ -306,17 +350,15 @@ def convert_image_to_pdf(image_resource):
     image_data = image_resource.raw_media
 
     if image_resource.format == "$548":
-        try:
-            image_data = convert_jxr_to_tiff(image_data, image_resource.location)
-        except Exception as e:
-            raise Exception("Exception during conversion of JPEG-XR '%s' to TIFF: %s" % (
-                image_resource.location, repr(e)))
+        image_data = convert_jxr_to_jpeg_or_png(image_data, image_resource.location)[0]
 
     pdf_file = io.BytesIO()
 
     with disable_debug_log():
         image = Image.open(io.BytesIO(image_data))
-        image = image.convert("RGB")
+        if image.mode != "RGB" and natural_sort_key(Image.__version__) < natural_sort_key("9.5.0"):
+            image = image.convert("RGB")
+
         image.save(pdf_file, "pdf", save_all=True)
         image.close()
 
@@ -326,109 +368,9 @@ def convert_image_to_pdf(image_resource):
     return PdfImageResource(image_resource.location, pdf_data, 0, 1)
 
 
-def combine_images_into_pdf(ordered_images):
-    if len(ordered_images) == 0:
-        return None
-
-    if pypdf is None:
-        log.error("pypdf package is missing. Unable to create PDF")
-        return None
-
-    image_resource_formats = set()
-    combined_pdf_images = []
-    for image_resource in ordered_images:
-        image_resource_formats.add(SYMBOL_FORMATS[image_resource.format].upper())
-        if image_resource.format == "$565":
-            if (combined_pdf_images and combined_pdf_images[-1].format == "$565" and combined_pdf_images[-1].location == image_resource.location
-                    and len(set(image_resource.page_nums) & set(combined_pdf_images[-1].page_nums)) == 0):
-                combined_pdf_images[-1].page_nums.extend(image_resource.page_nums)
-            else:
-                raw_media_file = io.BytesIO(image_resource.raw_media)
-                pdf = pypdf.PdfReader(raw_media_file)
-                image_resource.total_pages = len(pdf.pages)
-                combined_pdf_images.append(image_resource)
-        else:
-            combined_pdf_images.append(convert_image_to_pdf(image_resource))
-
-    if len(combined_pdf_images) == 1 and combined_pdf_images[0].entire_resource_used():
-        return combined_pdf_images[0].raw_media
-
-    try:
-        merger = pypdf.PdfMerger()
-
-        for image_resource in combined_pdf_images:
-            if not image_resource.entire_resource_used():
-                log.warning("Using PDF %s pages %s of %d" % (
-                    image_resource.location, image_resource.page_nums, image_resource.total_pages))
-
-            merger.append(fileobj=io.BytesIO(image_resource.raw_media), pages=None if image_resource.entire_resource_used() else image_resource.page_nums)
-
-        merged_file = io.BytesIO()
-        merger.write(merged_file)
-        pdf_data = merged_file.getvalue()
-        merged_file.close()
-    except Exception as e:
-        log.error("PdfMerger error: %s" % repr(e))
-        pdf_data = None
-
-    if pdf_data is not None:
-        log.info("Combined %d %s resources into a %d page PDF file" % (
-            len(combined_pdf_images), list_symbols(list(image_resource_formats)), len(ordered_images)))
-
-    return pdf_data
-
-
-def combine_images_into_cbz(ordered_images, lossless):
-    if len(ordered_images) == 0:
-        return None
-
-    image_resource_formats = set()
-    page_images = []
-    for image_resource in ordered_images:
-        image_resource_formats.add(SYMBOL_FORMATS[image_resource.format].upper())
-        if image_resource.format in {"$286", "$285", "$284"}:
-            page_images.append(image_resource)
-        elif image_resource.format == "$565":
-            for page_num in image_resource.page_nums:
-                jpeg_data = convert_pdf_to_jpeg(image_resource.raw_media, page_num)
-                page_images.append(ImageResource("$285", None, jpeg_data))
-        elif image_resource.png_from_jpg:
-            page_images.append(ImageResource("$284", None, image_resource.raw_media))
-        else:
-            image_data = image_resource.raw_media
-            if image_resource.format == "$548":
-                try:
-                    image_data = convert_jxr_to_tiff(image_data, image_resource.location)
-                except Exception as e:
-                    raise Exception("Exception during conversion of JPEG-XR '%s' to TIFF: %s" % (
-                        image_resource.location, repr(e)))
-
-            image = Image.open(io.BytesIO(image_data))
-            outfile = io.BytesIO()
-            save_format = "png" if lossless else "jpeg"
-            image.save(outfile, save_format, optimize=True)
-            jpeg_data = outfile.getvalue()
-            outfile.close()
-            page_images.append(ImageResource("$285", None, jpeg_data))
-
-    cbz_file = io.BytesIO()
-
-    with zipfile.ZipFile(cbz_file, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        for i, image_resource in enumerate(page_images):
-            zf.writestr("%04d.%s" % (i + 1, SYMBOL_FORMATS[image_resource.format]), image_resource.raw_media)
-
-    cbz_data = cbz_file.getvalue()
-    cbz_file.close()
-
-    log.info("Combined %s resources into a %d page CBZ file" % (
-        list_symbols(list(image_resource_formats)), len(ordered_images)))
-
-    return cbz_data
-
-
 def combine_image_tiles(
         resource_name, resource_height, resource_width, resource_format, tile_height, tile_width, tile_padding,
-        yj_tiles, tiles_raw_media, ignore_variants, lossless=False):
+        yj_tiles, tiles_raw_media, ignore_variants):
 
     if DEBUG_TILES:
         ncols = len(yj_tiles)
@@ -471,7 +413,7 @@ def combine_image_tiles(
         if missing_tiles:
             log.error("Resource %s is missing tiles: %s" % (resource_name, repr(missing_tiles)))
             if ignore_variants:
-                return None
+                return None, None
 
         full_image = Image.new(full_image_color_mode + full_image_opacity_mode, (resource_width, resource_height))
 
@@ -500,72 +442,57 @@ def combine_image_tiles(
             log.error("Resource %s combined tiled image size is (%d, %d) but should be (%d, %d)" % (
                     resource_name, full_image.size[0], full_image.size[1], resource_width, resource_height))
 
+        if resource_format == "$285" and COMBINE_TILES_LOSSLESS:
+            resource_format = "$284"
+
         fmt = SYMBOL_FORMATS[resource_format]
 
         if fmt == "jpg":
             desired_combined_size = max(int(separate_tiles_size * COMBINED_TILE_SIZE_FACTOR), 1024)
-            min_quality = MIN_JPEG_QUALITY
-            max_quality = MAX_JPEG_QUALITY
-            best_size_diff = best_quality = raw_media = None
+            raw_media, quality = optimize_jpeg_image_quality(full_image, desired_combined_size)
 
-            if lossless:
-                outfile = io.BytesIO()
-                full_image.save(outfile, "png", optimize=True)
-                raw_media = outfile.getvalue()
-                outfile.close()
-
-                if DEBUG_TILES:
-                    log.warning("Image resource %s has %d tiles %d bytes combined into lossless PNG %d bytes" % (
-                        resource_name, tile_count, separate_tiles_size, len(raw_media)))
-            else:
-                while max_quality >= min_quality:
-                    quality = (max_quality + min_quality) // 2
-                    outfile = io.BytesIO()
-                    full_image.save(outfile, "jpeg", quality=quality, optimize=True)
-                    test_raw_media = outfile.getvalue()
-                    outfile.close()
-
-                    size_diff = len(test_raw_media) - desired_combined_size
-
-                    if best_size_diff is None or abs(size_diff) < abs(best_size_diff):
-                        best_size_diff = size_diff
-                        best_quality = quality
-                        raw_media = test_raw_media
-
-                    if len(test_raw_media) < desired_combined_size:
-                        min_quality = quality + 1
-                    else:
-                        max_quality = quality - 1
-
-                diff_percentage = (best_size_diff * 100) // desired_combined_size
-                if DEBUG_TILES and abs(diff_percentage) > TILE_SIZE_REPORT_PERCENTAGE:
+            if DEBUG_TILES:
+                size_diff = len(raw_media) - desired_combined_size
+                diff_percentage = (size_diff * 100) // desired_combined_size
+                if abs(diff_percentage) >= TILE_SIZE_REPORT_PERCENTAGE:
                     log.warning("Image resource %s has %d tiles %d bytes combined into quality %d %s JPEG %d bytes (%+d%%)" % (
-                        resource_name, tile_count, separate_tiles_size, best_quality, full_image.mode, len(raw_media), diff_percentage))
+                        resource_name, tile_count, separate_tiles_size, quality, full_image.mode, len(raw_media), diff_percentage))
         else:
             outfile = io.BytesIO()
-            full_image.save(outfile, fmt, optimize=False)
+            full_image.save(outfile, fmt)
             raw_media = outfile.getvalue()
             outfile.close()
 
-    return raw_media
+        full_image.close()
+
+    return raw_media, resource_format
 
 
-def get_pdf_page_crop_boxes(pdf_data, resource_name=""):
-    page_crop_boxes = {}
-    raw_media_file = io.BytesIO(pdf_data)
-    pdf = pypdf.PdfReader(raw_media_file)
+def optimize_jpeg_image_quality(jpeg_image, desired_size):
+    min_quality = MIN_JPEG_QUALITY
+    max_quality = MAX_JPEG_QUALITY
+    best_size_diff = best_quality = best_raw_media = None
 
-    for i in range(len(pdf.pages)):
-        page_num = i + 1
-        page = pdf.pages[i]
+    while max_quality >= min_quality:
+        quality = (max_quality + min_quality) // 2
+        outfile = io.BytesIO()
+        jpeg_image.save(outfile, "JPEG", quality=quality, optimize=True)
+        raw_media = outfile.getvalue()
+        outfile.close()
 
-        if page.user_unit != 1:
-            log.warning("PDF resource %s page %d, user_unit %f -- dimensions are not in points" % (
-                resource_name, page_num, page.user_unit))
+        size_diff = len(raw_media) - desired_size
 
-        page_crop_boxes[page_num] = box_tuple(page.cropbox)
+        if best_size_diff is None or abs(size_diff) < abs(best_size_diff):
+            best_size_diff = size_diff
+            best_quality = quality
+            best_raw_media = raw_media
 
-    return page_crop_boxes
+        if len(raw_media) < desired_size:
+            min_quality = quality + 1
+        else:
+            max_quality = quality - 1
+
+    return best_raw_media, best_quality
 
 
 def get_pdf_page_size(pdf_data, resource_name, page_num):
@@ -607,6 +534,36 @@ def box_size(box):
     return (box.upper_right[0] - box.lower_left[0], box.upper_right[1] - box.lower_left[1])
 
 
+def crop_image(raw_media, resource_name, resource_width, resource_height, margin_left, margin_right, margin_top, margin_bottom):
+
+    with disable_debug_log():
+        img = Image.open(io.BytesIO(raw_media))
+        orig_width, orig_height = img.size
+        crop_left = int(margin_left * orig_width / resource_width)
+        crop_right = orig_width - int(margin_right * orig_width / resource_width) - 1
+        crop_top = int(margin_top * orig_height / resource_height)
+        crop_bottom = orig_height - int(margin_bottom * orig_height / resource_height) - 1
+
+        if crop_right < crop_left or crop_bottom < crop_top:
+            log.warning("cropping entire %s image resource %s (%d, %d) by (%d, %d, %d, %d)" % (
+                img.format, resource_name, orig_width, orig_height, crop_left, crop_top, crop_right, crop_bottom))
+
+        cropped_img = img.crop((crop_left, crop_top, crop_right, crop_bottom))
+
+        if img.format == "JPEG":
+            cropped_raw_media = optimize_jpeg_image_quality(cropped_img, len(raw_media) * 0.6)[0]
+        else:
+            cropped_file = io.BytesIO()
+            cropped_img.save(cropped_file, img.format)
+            cropped_img.close()
+            cropped_raw_media = cropped_file.getvalue()
+            cropped_file.close()
+
+        img.close()
+
+    return cropped_raw_media
+
+
 def jpeg_type(data, fmt="jpg"):
 
     if fmt not in ["jpg", "jpeg"]:
@@ -642,6 +599,9 @@ def font_file_ext(data, default=""):
 
     if data[0:4] == b"wOFF":
         return ".woff"
+
+    if data[0:4] == b"wOF2":
+        return ".woff2"
 
     if data[34:36] == b"\x4c\x50" and data[8:12] in {b"\x00\x00\x01\x00", b"\x01\x00\x02\x00", b"\x02\x00\x02\x00"}:
         return ".eot"

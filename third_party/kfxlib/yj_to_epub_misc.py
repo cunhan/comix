@@ -1,5 +1,3 @@
-from __future__ import (unicode_literals, division, absolute_import, print_function)
-
 from lxml import etree
 import operator
 import re
@@ -15,7 +13,7 @@ from .yj_versions import KNOWN_SUPPORTED_FEATURES
 
 
 __license__ = "GPL v3"
-__copyright__ = "2016-2023, John Howell <jhowell@acm.org>"
+__copyright__ = "2016-2025, John Howell <jhowell@acm.org>"
 
 
 DEVICE_SCREEN_NARROW_PX = 1200
@@ -136,6 +134,7 @@ class KFX_EPUB_Misc(object):
                 div_style.pop("font-size", "")
                 div_style.pop("line-height", "")
                 div_style.pop("-kfx-heading-level", "")
+                div_style.pop("margin-top", "")
 
                 img = image_div[0]
                 img_style = self.get_style(img)
@@ -253,6 +252,7 @@ class KFX_EPUB_Misc(object):
                     ("$72", "fill-opacity"),
                     ("$75", "stroke"),
                     ("$531", "stroke-dasharray"),
+                    ("$532", "stroke-dashoffset"),
                     ("$77", "stroke-linecap"),
                     ("$529", "stroke-linejoin"),
                     ("$530", "stroke-miterlimit"),
@@ -382,7 +382,7 @@ class KFX_EPUB_Misc(object):
             if vals[0:4] == [-1., 0., 0., -1.]:
                 return translate + "rotate(180deg)"
 
-            log.error("Unexpected transform matrix: %s" % str(vals))
+            log.warning("Unexpected transform matrix: %s" % str(vals))
             return "matrix(%s)" % (sep.join([value_str(v) for v in vals]))
 
         log.error("Unexpected transform: %s" % str(vals))

@@ -1,5 +1,3 @@
-from __future__ import (unicode_literals, division, absolute_import, print_function)
-
 import collections
 import functools
 
@@ -8,7 +6,7 @@ from .utilities import (list_symbols, type_name)
 
 
 __license__ = "GPL v3"
-__copyright__ = "2016-2023, John Howell <jhowell@acm.org>"
+__copyright__ = "2016-2025, John Howell <jhowell@acm.org>"
 
 
 DRMION_SIGNATURE = b"\xeaDRMION\xee"
