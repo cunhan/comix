@@ -111,7 +111,7 @@ class Kindle:
 
         return True
 
-    def download_resources(self, res):
+    def download_resource(self, res):
         print(f"Downloading {res['id']}")
         data, filename = self.get_resource(res)        
         with open(os.path.join(self.temp_folder, filename), "wb") as f:
@@ -133,11 +133,12 @@ class Kindle:
         Path(self.temp_folder).mkdir(exist_ok=True)
 
         # TODO: parallel downloads
-        result = Parallel(n_jobs=4, prefer="threads")(delayed(self.download_resources)(res) for res in self.resources)
+        result = Parallel(n_jobs=4, prefer="threads")(delayed(self.download_resource)(res) for res in self.resources)
+
+        # #download in order
         # i = 0
         # for resource in self.resources[i:]:
         #     print(f"Downloading the book . . . {int(i/len(self.resources)*100)}%\r", end="")
-
         #     self.download_resources(resource)
         #     i += 1
 
