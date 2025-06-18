@@ -132,4 +132,6 @@ dmypy.json
 .vscode/
 output/
 experiment/
+state/
 state.json
+download_new_book.bat
