@@ -9,6 +9,7 @@ import re
 import requests
 import shutil
 import xml.etree.ElementTree as ET
+from joblib import Parallel, delayed
 
 from third_party.ion import DrmIon,DrmIonVoucher
 from third_party.kfxlib.yj_book import YJ_Book
@@ -110,6 +111,14 @@ class Kindle:
 
         return True
 
+    def download_resources(self, res):
+        print(f"Downloading {res['id']}")
+        data, filename = self.get_resource(res)        
+        with open(os.path.join(self.temp_folder, filename), "wb") as f:
+            if filename.endswith(".kfx"):
+                data = self.decrypt_kfx(data)
+            f.write(data)    
+        print(f"Saved {filename}")
 
     def download(self, output_folder = None, keep_temp = False):
         if not output_folder:
@@ -124,16 +133,13 @@ class Kindle:
         Path(self.temp_folder).mkdir(exist_ok=True)
 
         # TODO: parallel downloads
-        i = 0
-        for resource in self.resources[i:]:
-            print(f"Downloading the book . . . {int(i/len(self.resources)*100)}%\r", end="")
+        result = Parallel(n_jobs=4, prefer="threads")(delayed(self.download_resources)(res) for res in self.resources)
+        # i = 0
+        # for resource in self.resources[i:]:
+        #     print(f"Downloading the book . . . {int(i/len(self.resources)*100)}%\r", end="")
 
-            data, filename = self.get_resource(resource)
-            with open(os.path.join(self.temp_folder, filename), "wb") as f:
-                if filename.endswith(".kfx"):
-                    data = self.decrypt_kfx(data)
-                f.write(data)
-            i += 1
+        #     self.download_resources(resource)
+        #     i += 1
 
         print("\nExtracting . . . ")        
               
